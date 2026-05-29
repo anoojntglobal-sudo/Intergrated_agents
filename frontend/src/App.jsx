@@ -20,6 +20,7 @@ function AppLayout() {
           <Routes>
             <Route path="/"            element={<Dashboard />} />
             <Route path="/agent"       element={<AgentRunner />} />
+            <Route path="/accounts"    element={<AccountsPage mode="all" />} />
             <Route path="/influencers" element={<AccountsPage mode="influencers" />} />
             <Route path="/pr-pages"    element={<AccountsPage mode="pr-pages" />} />
             <Route path="/keywords"    element={<KeywordsPage />} />

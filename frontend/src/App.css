@@ -333,6 +333,37 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', 'Segoe U
 .arf-dim-bar      { flex: 1; height: 4px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
 .arf-score        { font-size: 22px; font-weight: 700; text-align: right; }
 .arf-tags         { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.arf-main-row     { display: grid; grid-template-columns: 28px 40px 1fr 110px 180px 52px 90px 24px; gap: 12px; align-items: center; padding: 12px 16px; cursor: pointer; }
+.arf-main-row:hover { background: rgba(29,155,240,.04); border-radius: 10px; }
+.arf-meta-row     { display: flex; gap: 6px; margin-top: 3px; flex-wrap: wrap; }
+.arf-expand-btn   { font-size: 10px; color: var(--text2); text-align: center; }
+.account-row-full { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; overflow: hidden; transition: border-color .15s; }
+.account-row-full.expanded { border-color: var(--blue); }
+.arf-hint         { font-size: 11px; color: var(--text2); margin-bottom: 8px; }
+
+/* Contact panel */
+.contact-panel    { padding: 16px 20px; border-top: 1px solid var(--border); background: var(--bg3); }
+.contact-panel-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text2); margin-bottom: 14px; }
+.contact-grid     { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 14px; }
+.contact-item     { display: flex; flex-direction: column; gap: 4px; }
+.contact-label    { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--text2); letter-spacing: .05em; }
+.contact-link     { font-size: 13px; color: var(--blue); text-decoration: none; word-break: break-all; }
+.contact-link:hover { text-decoration: underline; }
+.contact-link.green { color: var(--green); }
+.contact-link.blue  { color: var(--blue); }
+.contact-na       { font-size: 12px; color: var(--text2); font-style: italic; }
+.contact-hint     { font-size: 12px; color: var(--gold); }
+.contact-bio, .contact-ai { margin-bottom: 12px; }
+.contact-bio p, .contact-ai p { font-size: 12px; color: var(--text2); margin-top: 4px; line-height: 1.6; }
+.contact-scores   { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
+.contact-score-row { display: flex; align-items: center; gap: 8px; }
+.cs-label         { font-size: 11px; color: var(--text2); min-width: 90px; }
+.cs-bar           { flex: 1; height: 4px; background: var(--bg2); border-radius: 2px; overflow: hidden; }
+.cs-val           { font-size: 12px; font-weight: 700; min-width: 24px; text-align: right; }
+
+/* Contact filter chips */
+.contact-chip.active-dm    { background: rgba(0,200,150,.12); border-color: var(--green); color: var(--green); }
+.contact-chip.active-email { background: rgba(29,155,240,.12); border-color: var(--blue); color: var(--blue); }
 
 /* ── Keywords page ────────────────────────────────────────────────────────── */
 .add-keyword-form   { display: flex; gap: 12px; margin-bottom: 20px; }

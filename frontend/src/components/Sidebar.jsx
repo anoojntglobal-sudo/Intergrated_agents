@@ -5,8 +5,9 @@ import { useAgent } from '../context/AgentContext';
 const NAV = [
   { to: '/',            icon: '▦',  label: 'Dashboard'   },
   { to: '/agent',       icon: '⚡', label: 'Run Agent'   },
-  { to: '/influencers', icon: '★',  label: 'Collab (A)'  },
-  { to: '/pr-pages',    icon: '📢', label: 'Ads (B)'     },
+  { to: '/accounts',    icon: '◉',  label: 'All Accounts' },
+  { to: '/influencers', icon: '★',  label: 'Track A'      },
+  { to: '/pr-pages',    icon: '📢', label: 'Track B'      },
   { to: '/keywords',    icon: '🔑', label: 'Keywords'    },
   { to: '/settings',    icon: '⚙',  label: 'Settings'    },
 ];
