@@ -10,6 +10,7 @@ const NAV = [
   { to: '/pr-pages',    icon: '📢', label: 'Track B'      },
   { to: '/keywords',    icon: '🔑', label: 'Keywords'    },
   { to: '/settings',    icon: '⚙',  label: 'Settings'    },
+  { to: '/workflow',    icon: '⬡',  label: 'Workflow'    },
 ];
 
 export default function Sidebar() {

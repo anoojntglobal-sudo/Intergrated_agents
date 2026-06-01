@@ -1,12 +1,11 @@
 const axios = require('axios');
 
 // ── Model config ──────────────────────────────────────────────────────────────
-// Only Claude Haiku — fast, cheap, accurate for classification.
-// No expensive fallbacks.
-const SCORING_MODEL = 'anthropic/claude-haiku-4-5';
+// Top model: Claude Opus 4.5 — most capable, best classification accuracy
+const SCORING_MODEL = 'anthropic/claude-opus-4-5';
 
 const MODEL_CHAIN = [
-  'anthropic/claude-haiku-4-5',
+  'anthropic/claude-opus-4-5',
 ];
 
 // Batch size — how many accounts to score in one AI call

@@ -9,6 +9,7 @@ import AgentRunner    from './pages/AgentRunner';
 import AccountsPage   from './pages/AccountsPage';
 import KeywordsPage   from './pages/KeywordsPage';
 import SettingsPage   from './pages/SettingsPage';
+import WorkflowPage   from './pages/WorkflowPage';
 
 function AppLayout() {
   return (
@@ -25,6 +26,7 @@ function AppLayout() {
             <Route path="/pr-pages"    element={<AccountsPage mode="pr-pages" />} />
             <Route path="/keywords"    element={<KeywordsPage />} />
             <Route path="/settings"    element={<SettingsPage />} />
+            <Route path="/workflow"    element={<WorkflowPage />} />
             <Route path="*"            element={<Navigate to="/" replace />} />
           </Routes>
         </main>
