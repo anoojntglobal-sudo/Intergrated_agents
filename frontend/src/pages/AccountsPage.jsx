@@ -53,87 +53,116 @@ function StatsBar({ accounts }) {
 // ── Contact details panel (shown when expanded) ───────────────────────────────
 function ContactPanel({ account }) {
   const handle = (account.handle || '').replace(/^@/, '');
+  const xProfileUrl = `https://x.com/${handle}`;
+
   return (
     <div className="contact-panel">
-      <div className="contact-panel-title">Contact Details</div>
-      <div className="contact-grid">
-        {/* DM on X */}
-        <div className="contact-item">
-          <span className="contact-label">DM on X</span>
-          {account.dm_open ? (
-            <a href={`https://x.com/messages/compose?recipient_id=${handle}`}
-              target="_blank" rel="noreferrer" className="contact-link green">
-              Open DM → @{handle}
-            </a>
-          ) : (
-            <span className="contact-na">DMs not indicated as open</span>
-          )}
-        </div>
 
-        {/* Email */}
-        <div className="contact-item">
-          <span className="contact-label">Email</span>
-          {account.contact_email ? (
-            <a href={`mailto:${account.contact_email}`} className="contact-link blue">
-              {account.contact_email}
-            </a>
-          ) : account.has_email ? (
-            <span className="contact-hint">Email in bio — check profile</span>
-          ) : (
-            <span className="contact-na">No email found</span>
-          )}
-        </div>
-
-        {/* Website */}
-        <div className="contact-item">
-          <span className="contact-label">Website</span>
-          {account.website ? (
-            <a href={account.website} target="_blank" rel="noreferrer" className="contact-link">
-              {account.website}
-            </a>
-          ) : <span className="contact-na">None</span>}
-        </div>
-
-        {/* X Profile */}
-        <div className="contact-item">
-          <span className="contact-label">X Profile</span>
-          <a href={`https://x.com/${handle}`} target="_blank" rel="noreferrer" className="contact-link">
-            x.com/{handle}
+      {/* Header row — avatar + summary */}
+      <div className="cp-header">
+        <img src={account.avatar} alt={account.name} className="cp-avatar"
+          onError={e => { e.target.style.display = 'none'; }} />
+        <div className="cp-summary">
+          <div className="cp-name">
+            {account.name}
+            {account.verified && <span className="verified-badge"> ✓</span>}
+          </div>
+          <a href={xProfileUrl} target="_blank" rel="noreferrer" className="cp-handle-link">
+            @{handle} ↗
           </a>
+          <div className="cp-meta-chips">
+            <span className={`track-badge track-${account.track}`}>Track {account.track}</span>
+            <span className={`type-badge type-${(account.account_type||'').replace(/\s+/g,'-').toLowerCase()}`}>
+              {account.account_type}
+            </span>
+            <span className="cp-tier">{account.tier}</span>
+            <span className="cp-followers">{(account.followers||0).toLocaleString()} followers</span>
+          </div>
+        </div>
+        <div className="cp-overall" style={{ color: scoreColor(account.overall) }}>
+          <div className="cp-overall-num">{account.overall}</div>
+          <div className="cp-overall-label">overall score</div>
         </div>
       </div>
 
       {/* Bio */}
       {account.bio && (
-        <div className="contact-bio">
-          <span className="contact-label">Bio</span>
-          <p>{account.bio}</p>
+        <div className="cp-section">
+          <div className="cp-section-label">Bio</div>
+          <div className="cp-bio-text">{account.bio}</div>
         </div>
       )}
 
-      {/* AI reason */}
-      {account.ai_reason && (
-        <div className="contact-ai">
-          <span className="contact-label">AI Assessment</span>
-          <p>🤖 {account.ai_reason}</p>
+      {/* Contact row */}
+      <div className="cp-section">
+        <div className="cp-section-label">Contact</div>
+        <div className="cp-contacts">
+
+          {/* X Profile — always shown */}
+          <a href={xProfileUrl} target="_blank" rel="noreferrer" className="cp-contact-btn cp-x">
+            𝕏 View Profile
+          </a>
+
+          {/* DM — only if open */}
+          {account.dm_open && (
+            <a href={xProfileUrl} target="_blank" rel="noreferrer" className="cp-contact-btn cp-dm">
+              💬 Send DM
+            </a>
+          )}
+
+          {/* Email */}
+          {account.contact_email && (
+            <a href={`mailto:${account.contact_email}`} className="cp-contact-btn cp-email">
+              ✉ {account.contact_email}
+            </a>
+          )}
+          {!account.contact_email && account.has_email && (
+            <span className="cp-contact-hint">✉ Email in bio — check profile</span>
+          )}
+
+          {/* Website */}
+          {account.website && (
+            <a href={account.website} target="_blank" rel="noreferrer" className="cp-contact-btn cp-web">
+              🌐 Website
+            </a>
+          )}
         </div>
-      )}
+      </div>
 
       {/* Score breakdown */}
-      <div className="contact-scores">
-        {[
-          ['D2', 'Collab Intent', account.d2, true],
-          ['D3', 'AI Relevance', account.d3, true],
-          ['D4', 'Authority', account.d4, false],
-          ['D5', 'Reach', account.d5, false],
-        ].map(([k, l, v, ai]) => (
-          <div key={k} className="contact-score-row">
-            <span className="cs-label">{k} {l}{ai && <span className="dim-ai">AI</span>}</span>
-            <div className="cs-bar"><div style={{ width:`${v}%`, background: scoreColor(v), height:'100%', borderRadius:2 }} /></div>
-            <span className="cs-val" style={{ color: scoreColor(v) }}>{v}</span>
-          </div>
-        ))}
+      <div className="cp-section">
+        <div className="cp-section-label">Score Breakdown</div>
+        <div className="cp-scores">
+          {[
+            { key: 'D2', label: 'Collab Intent', value: account.d2,  ai: true,  desc: 'How open to partnerships/DMs' },
+            { key: 'D3', label: 'AI Relevance',  value: account.d3,  ai: true,  desc: 'How AI/voice focused' },
+            { key: 'D4', label: 'Authority',      value: account.d4,  ai: false, desc: 'Verified + follower ratio' },
+            { key: 'D5', label: 'Reach Quality',  value: account.d5,  ai: false, desc: 'Follower tier' },
+          ].map(d => (
+            <div key={d.key} className="cp-score-item">
+              <div className="cp-score-top">
+                <span className="cp-score-key">{d.key}</span>
+                <span className="cp-score-label">{d.label}</span>
+                {d.ai && <span className="dim-ai">AI</span>}
+                <span className="cp-score-val" style={{ color: scoreColor(d.value) }}>{d.value}</span>
+              </div>
+              <div className="cp-score-bar">
+                <div style={{ width:`${d.value}%`, background: scoreColor(d.value), height:'100%', borderRadius:3 }} />
+              </div>
+              <div className="cp-score-desc">{d.desc}</div>
+            </div>
+          ))}
+        </div>
       </div>
+
+      {/* AI Assessment */}
+      {account.ai_reason && (
+        <div className="cp-section">
+          <div className="cp-section-label">AI Assessment</div>
+          <div className="cp-ai-reason">🤖 {account.ai_reason}</div>
+        </div>
+      )}
+
     </div>
   );
 }
