@@ -476,21 +476,47 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', s
       if (r.success) {
         health.successes++;
         const u         = r.data;
-        const sc        = scoreAndClassify(u);
-        const followers = Number(u.sub_count) || 0;
+        const followers = Number(u.sub_count)      || 0;
+        const tweets    = Number(u.statuses_count) || 0;
+        const name      = (u.name || '').trim();
+        const bio       = (u.desc || '').trim();
+
+        // ── Minimum bar — discard invalid/bot/empty profiles ──────────────
+        // These checks happen before scoring to save AI quota on junk accounts
+        const skipReason =
+          followers < 100                    ? `only ${followers} followers` :
+          tweets    < 1                      ? 'no tweets'                   :
+          name.length === 0                  ? 'no name (suspended?)'        :
+          (followers < 500 && bio.length === 0) ? 'no bio + low followers'   :
+          null;
+
+        if (skipReason) {
+          emit('status', { step: 'filtered',
+            message: `Skipped @${handle} — ${skipReason}`, progress: Math.round((i / targets.length) * 80) });
+          continue;
+        }
+
+        const sc = scoreAndClassify(u);
+
+        // Post-score gate — discard accounts with near-zero relevance (score < 10)
+        // e.g. 100-follower, no bio, no website → overall ≈ 7-8. Not worth AI quota or DB space.
+        if (sc.overall < 10) {
+          emit('status', { step: 'filtered', message: `Skipped @${handle} — overall score too low (${sc.overall})`, progress: Math.round((i / targets.length) * 80) });
+          continue;
+        }
 
         fetchedAccounts.push({
-          handle:    handle.toLowerCase(),
-          name:      u.name   || handle,
-          bio:       u.desc   || '',
+          handle: handle.toLowerCase(),
+          name,
+          bio,
           followers,
-          following: Number(u.friends)        || 0,
-          tweets:    Number(u.statuses_count) || 0,
-          verified:  u.blue_verified          || false,
-          avatar:    u.avatar                 || '',
-          website:   u.website                || '',
-          location:  u.location               || '',
-          _sc: sc, // keyword scores — used as fallback if AI unavailable
+          following: Number(u.friends) || 0,
+          tweets,
+          verified:  u.blue_verified  || false,
+          avatar:    u.avatar         || '',
+          website:   u.website        || '',
+          location:  u.location       || '',
+          _sc: sc,
         });
       } else {
         health.errors++;
@@ -621,13 +647,35 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', s
         health.calls++; health.totalMs += r.duration_ms;
         if (r.success) {
           health.successes++;
-          const u = r.data; const sc = scoreAndClassify(u); const followers = Number(u.sub_count) || 0;
-          directFetched.push({
-            handle: handle.toLowerCase(), name: u.name || handle, bio: u.desc || '',
-            followers, following: Number(u.friends) || 0, tweets: Number(u.statuses_count) || 0,
-            verified: u.blue_verified || false, avatar: u.avatar || '', website: u.website || '', location: u.location || '',
-            _sc: sc,
-          });
+          const u         = r.data;
+          const followers = Number(u.sub_count)      || 0;
+          const tweets    = Number(u.statuses_count) || 0;
+          const name      = (u.name || '').trim();
+          const bio       = (u.desc || '').trim();
+
+          const skipReason =
+            followers < 100                       ? `only ${followers} followers` :
+            tweets    < 1                         ? 'no tweets'                   :
+            name.length === 0                     ? 'no name (suspended?)'        :
+            (followers < 500 && bio.length === 0) ? 'no bio + low followers'      :
+            null;
+
+          if (skipReason) {
+            emit('status', { step: 'filtered', message: `Skipped @${handle} (friend list) — ${skipReason}`, progress: 95 });
+          } else {
+            const sc = scoreAndClassify(u);
+            if (sc.overall < 10) {
+              emit('status', { step: 'filtered', message: `Skipped @${handle} (friend list) — score too low (${sc.overall})`, progress: 95 });
+            } else {
+              directFetched.push({
+                handle: handle.toLowerCase(), name, bio,
+                followers, following: Number(u.friends) || 0, tweets,
+                verified: u.blue_verified || false, avatar: u.avatar || '',
+                website: u.website || '', location: u.location || '',
+                _sc: sc,
+              });
+            }
+          }
         } else { health.errors++; }
       }
       // Batch AI score the direct handles

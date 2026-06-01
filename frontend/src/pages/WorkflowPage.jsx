@@ -250,6 +250,9 @@ export default function WorkflowPage() {
   PROFILE FETCH ─── callAPI(screenname.php) ──► name, bio, followers, following, verified …
        │
        ▼
+  VALIDATION ─── followers≥100 · tweets≥1 · has name · (bio if <500) ──► discard bots/empty
+       │
+       ▼
   KEYWORD SCORING (instant) ─── D4 (influence signals) + D5 (reach tier)
        │
        ▼
@@ -418,6 +421,44 @@ export default function WorkflowPage() {
 
         <Arrow />
 
+        {/* STEP 5.5 — PROFILE VALIDATION (MINIMUM BAR) */}
+        <Card color={C.red} title="PROFILE VALIDATION — Minimum Bar (Discard Invalid Profiles)">
+          <InfoBox color={C.red} style={{ marginBottom: 14 }}>
+            <strong>Runs immediately after each profile fetch, before scoring.</strong><br />
+            Invalid profiles are discarded so AI quota is never wasted on bots or empty accounts.
+            A <Tag color={C.muted}>status / filtered</Tag> SSE event is emitted for each skipped account.
+          </InfoBox>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10, marginBottom: 14 }}>
+            {[
+              { check: 'followers < 100', reason: 'Likely bot, spam, or brand-new account with no real audience', icon: '🤖' },
+              { check: 'tweets === 0', reason: 'Account has never posted — inactive, placeholder, or suspended', icon: '💤' },
+              { check: 'name is empty', reason: 'Deactivated or suspended account — API returns blank name', icon: '❌' },
+              { check: 'followers < 500 AND bio is empty', reason: 'Low-reach account with nothing to evaluate — no signal at all', icon: '🕳' },
+            ].map(({ check, reason, icon }) => (
+              <div key={check} style={{
+                background: C.bg,
+                border: `1px solid ${C.red}33`,
+                borderLeft: `3px solid ${C.red}`,
+                borderRadius: 6,
+                padding: '10px 12px',
+                fontSize: 12,
+              }}>
+                <div style={{ fontFamily: 'monospace', color: C.red, marginBottom: 4, fontSize: 11 }}>
+                  {icon} DISCARD if: {check}
+                </div>
+                <div style={{ color: C.muted, lineHeight: 1.5 }}>{reason}</div>
+              </div>
+            ))}
+          </div>
+          <InfoBox color={C.green}>
+            <strong>Profiles that PASS the minimum bar:</strong><br />
+            ≥ 100 followers · ≥ 1 tweet · has a name · (if &lt; 500 followers, must have a bio).<br />
+            These go forward into scoring. Everything else is logged and skipped.
+          </InfoBox>
+        </Card>
+
+        <Arrow />
+
         {/* STEP 6 — KEYWORD SCORING */}
         <Card color={C.green} step={6} title="KEYWORD SCORING — Algorithmic D4 & D5 (Instant, No API Call)">
           <Row gap={16} style={{ marginBottom: 12 }}>
@@ -552,6 +593,82 @@ export default function WorkflowPage() {
               Visible in <em>Track B</em> page (<Code>/pr-pages</Code>).
             </InfoBox>
           </Row>
+        </Card>
+
+        <Arrow />
+
+        {/* RANKING & WHAT WE LOOK FOR */}
+        <Card color={C.purple} title="RANKING & WHAT WE LOOK FOR — Ideal Profile Characteristics">
+          <InfoBox color={C.purple} style={{ marginBottom: 16 }}>
+            All profiles that pass the minimum bar are saved to the database and ranked by <strong>Overall score (0–100)</strong>.
+            There is no hard cutoff — the UI filters let you slice by tier. Here's what makes a high-scoring profile:
+          </InfoBox>
+
+          {/* Score tiers */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 16 }}>
+            {[
+              { tier: 'TIER 1 — Top Pick', range: '≥ 65', color: C.green, profiles: ['Macro/Mid-Tier influencer (100K+ followers)', '"DM open" or email in bio', 'AI/voice content creator or builder', 'Verified account', 'Strong AI keyword density in bio'] },
+              { tier: 'TIER 2 — Good', range: '45–64', color: C.gold, profiles: ['Micro influencer (10K–100K followers)', 'Has website, some collab signals', 'Mentions AI/tech regularly', 'Active poster, decent ratio'] },
+              { tier: 'ARCHIVE', range: '< 45', color: '#888', profiles: ['Nano/low followers (500–10K)', 'No collab signals', 'Minimal AI relevance', 'Still saved for reference / ads targeting'] },
+            ].map(({ tier, range, color, profiles }) => (
+              <div key={tier} style={{ background: C.bg, border: `1px solid ${color}44`, borderTop: `3px solid ${color}`, borderRadius: 6, padding: '12px 14px' }}>
+                <div style={{ color, fontWeight: 700, fontSize: 12, marginBottom: 4 }}>{tier}</div>
+                <div style={{ color: C.muted, fontSize: 11, marginBottom: 8 }}>Score {range}</div>
+                {profiles.map(p => (
+                  <div key={p} style={{ fontSize: 11, color: C.text, lineHeight: 1.7 }}>✓ {p}</div>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          {/* Score formula with worked example */}
+          <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: '16px 18px', marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.purple, marginBottom: 12 }}>
+              SCORING FORMULA — Worked Example: @vapidev (12,400 followers, verified, "DM for partnerships")
+            </div>
+            <div style={{ fontFamily: 'monospace', fontSize: 12, lineHeight: 2.2 }}>
+              {[
+                { dim: 'D2', name: 'Collab Intent', weight: '25%', calc: '"DM for partnerships" in bio → AI scores 88', val: 88, ai: true },
+                { dim: 'D3', name: 'AI Relevance', weight: '25%', calc: '"Build voice AI apps" → AI scores 95', val: 95, ai: true },
+                { dim: 'D4', name: 'Authority', weight: '20%', calc: '+30 verified + +22 ratio≥10 + +20 10K+ = 72', val: 72, ai: false },
+                { dim: 'D5', name: 'Reach Quality', weight: '30%', calc: '12,400 followers → Micro tier = 60', val: 60, ai: false },
+              ].map(({ dim, name, weight, calc, val, ai }) => (
+                <div key={dim} style={{ display: 'grid', gridTemplateColumns: '36px 130px 50px 1fr 50px', gap: 8, alignItems: 'center', borderBottom: `1px solid ${C.border}`, paddingBottom: 4 }}>
+                  <span style={{ color: '#79c0ff', fontWeight: 700 }}>{dim}</span>
+                  <span style={{ color: C.text, fontSize: 11 }}>{name}</span>
+                  <span style={{ color: C.green }}>{weight}</span>
+                  <span style={{ color: C.muted, fontSize: 11 }}>{calc} {ai ? <Tag color={C.gold} style={{ fontSize: 9 }}>AI</Tag> : <Tag color={C.green} style={{ fontSize: 9 }}>algo</Tag>}</span>
+                  <span style={{ color: '#79c0ff', textAlign: 'right' }}>{val}</span>
+                </div>
+              ))}
+              <div style={{ borderTop: `2px solid ${C.purple}`, paddingTop: 8, marginTop: 4, display: 'flex', justifyContent: 'space-between', fontWeight: 700 }}>
+                <span style={{ color: C.text }}>Overall = 88×0.25 + 95×0.25 + 72×0.20 + 60×0.30</span>
+                <span style={{ color: C.purple, fontSize: 16 }}>= 78</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Track A vs B */}
+          <Row gap={12}>
+            <InfoBox color={C.green} style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, color: C.green, marginBottom: 6 }}>TRACK A — Collab Pipeline</div>
+              Types: Influencer · AI Media · Account<br />
+              <strong>Action:</strong> Contact directly — DM on X, cold email, propose deal.<br />
+              <strong>Goal:</strong> Paid review, sponsored post, co-marketing.<br />
+              <Code style={{ fontSize: 10 }}>/accounts → /influencers</Code>
+            </InfoBox>
+            <InfoBox color={C.gold} style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, color: C.gold, marginBottom: 6 }}>TRACK B — Ads Audience Only</div>
+              Types: PR Page · Brand Page<br />
+              <strong>Action:</strong> Never contact directly. Use for X Ads targeting.<br />
+              <strong>Goal:</strong> Target <em>their followers</em> with paid ads.<br />
+              <Code style={{ fontSize: 10 }}>/pr-pages</Code>
+            </InfoBox>
+          </Row>
+          <InfoBox color={C.muted} style={{ marginTop: 10, fontSize: 11 }}>
+            <strong>Track is enforced by type, not by AI suggestion.</strong> If AI classifies type as "PR Page" or "Brand Page",
+            the backend always sets track = "B" — even if AI returns track = "A". This prevents the @gokiteai-style bug.
+          </InfoBox>
         </Card>
 
         <Arrow />
