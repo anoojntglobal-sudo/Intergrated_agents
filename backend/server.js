@@ -140,7 +140,7 @@ class QuotaExhaustedError extends Error {
 // Sleep in 8-second chunks, sending SSE keepalive pings so browser
 // doesn't close the idle EventSource connection during long rate-limit waits
 async function sleepWithPing(totalMs, keepAlive) {
-  const CHUNK = 8_000;
+  const CHUNK = 5_000; // ping every 5s — Render drops idle SSE after ~30s
   let remaining = totalMs;
   while (remaining > 0) {
     const chunk = Math.min(CHUNK, remaining);
@@ -415,13 +415,21 @@ async function upsertAccount(account, runId) {
 
 // ── Core agent run function (reused by SSE endpoint + cron) ───────────────────
 async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', sseRes = null, isAborted = () => false }) {
-  const emit = (event, data) => { if (sseRes && !isAborted()) sse(sseRes, event, data); };
+  const emit = (event, data) => {
+    if (sseRes && !isAborted()) {
+      try { sse(sseRes, event, data); } catch { aborted = true; } // socket closed — mark aborted
+    }
+  };
   // Pass a status emitter into callAPI so pacing messages reach the UI
   const pace = (msg) => emit('status', { step: 'pacing', message: msg });
   const paceWithBreak = async (msg) => { pace(msg); await humanBreak(pace); };
   // Sends a raw SSE comment every 8s during rate-limit waits — keeps the
   // browser's EventSource TCP connection alive during long silent periods
-  const keepAlive = () => { if (sseRes && !isAborted()) sseRes.write(': ping\n\n'); };
+  const keepAlive = () => {
+    if (sseRes && !isAborted()) {
+      try { sseRes.write(': ping\n\n'); } catch { aborted = true; } // socket closed
+    }
+  };
 
   // Create run record
   const runResult = await db.execute({
