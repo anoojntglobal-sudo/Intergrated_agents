@@ -304,8 +304,8 @@ export default function SettingsPage() {
       <div className="settings-card">
         <div className="settings-card-header">
           <div>
-            <h2>Monthly Auto-Run</h2>
-            <p>Agent runs automatically on the 1st of every month at 02:00 UTC.</p>
+            <h2>Auto-Run Schedule</h2>
+            <p>Weekly refresh every Monday + full run on the 1st of every month — both at 02:00 UTC.</p>
           </div>
           <label className="toggle-switch">
             <input type="checkbox" checked={autoRun} onChange={e => toggleAutoRun(e.target.checked)} />
@@ -315,8 +315,11 @@ export default function SettingsPage() {
         </div>
         <div className="schedule-info">
           <div className="sched-row"><span>Last run</span><span>{config?.last_run || 'Never'}</span></div>
-          <div className="sched-row"><span>Schedule</span><span>0 2 1 * * (UTC)</span></div>
-          <div className="sched-row"><span>Trigger</span><span>node-cron on backend</span></div>
+          <div className="sched-row"><span>Next run</span><span>{config?.next_run || '—'}</span></div>
+          <div className="sched-row"><span>Weekly refresh</span><span>0 2 * * 1 — every Monday 02:00 UTC</span></div>
+          <div className="sched-row"><span>Monthly full run</span><span>0 2 1 * * — 1st of month 02:00 UTC</span></div>
+          <div className="sched-row"><span>Request cap / run</span><span>5,000 calls (protects shared quota)</span></div>
+          <div className="sched-row"><span>Skip recent</span><span>Accounts updated within 6 days are skipped on weekly runs</span></div>
         </div>
       </div>
 

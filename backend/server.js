@@ -65,20 +65,26 @@ app.use('/api/settings',  require('./routes/settings'));
 const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST || 'twitter-api45.p.rapidapi.com';
 const BASE_URL      = `https://${RAPIDAPI_HOST}`;
 
-const SAFE_RPM  = 6;     // requests-per-minute per key
+const SAFE_RPM  = 6;     // standard keys — requests-per-minute
+const PAID_RPM  = Math.max(1, Number(process.env.PAID_KEY_RPM) || 3); // paid shared key (conservative)
 const JITTER_MS = 1200;  // ±600ms random spread
+
+// Per-run request cap — protects shared paid key quota
+// 5000 = ~20% of 100K monthly shared limit, across 4 weekly runs
+const MAX_REQUESTS_PER_RUN = Number(process.env.MAX_REQUESTS_PER_RUN) || 5000;
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function jitter()  { return Math.floor(Math.random() * JITTER_MS) - JITTER_MS / 2; }
 
 const KEYS = [
-  process.env.RAPIDAPI_KEY,
-  process.env.RAPIDAPI_KEY_BACKUP,
-].filter(Boolean).map((key, i) => ({
+  { key: process.env.RAPIDAPI_KEY,        label: 'Key1',    rpm: SAFE_RPM },
+  { key: process.env.RAPIDAPI_KEY_BACKUP, label: 'Key2',    rpm: SAFE_RPM },
+  { key: process.env.RAPIDAPI_KEY_PAID,   label: 'KeyPaid', rpm: PAID_RPM },
+].filter(k => k.key).map(({ key, label, rpm }) => ({
   key,
-  label:             `Key${i + 1}`,
-  rpm:               SAFE_RPM,
-  minGapMs:          Math.ceil(60_000 / SAFE_RPM),
+  label,
+  rpm,
+  minGapMs:          Math.ceil(60_000 / rpm),
   lastFiredAt:       0,
   cooldownUntil:     0,
   disabled:          false,
@@ -445,8 +451,23 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', s
         handles.push(h);
       }
     }
-    // No hard cap — take all unique handles from this search (up to 50 per query)
-    const targets = handles;
+    // Filter out handles updated within the last 6 days (weekly run optimisation)
+    // These accounts are fresh enough — skip re-fetching to save API quota
+    const recentCutoff = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+    const freshHandles = handles.map(h => h.toLowerCase());
+    let skipCount = 0;
+    const freshInDb = freshHandles.length > 0
+      ? (await db.execute({
+          sql:  `SELECT handle FROM accounts WHERE handle IN (${freshHandles.map(()=>'?').join(',')}) AND last_updated > ?`,
+          args: [...freshHandles, recentCutoff],
+        })).rows.map(r => r.handle)
+      : [];
+    const recentSet = new Set(freshInDb);
+    const targets = handles.filter(h => {
+      if (recentSet.has(h.toLowerCase())) { skipCount++; seenThisRun.add(h.toLowerCase()); return false; }
+      return true;
+    });
+    if (skipCount > 0) emit('status', { step: 'skipped_recent', message: `Skipped ${skipCount} handles updated within last 6 days (saving quota)` });
 
     emit('search_done', {
       query, found: handles.length, fetching: targets.length, handles: targets,
@@ -473,6 +494,15 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', s
       const r = await callAPI('screenname.php', { screenname: handle }, pace, keepAlive);
       health.calls++; health.totalMs += r.duration_ms;
       durations.push(r.duration_ms);
+
+      // Per-run request cap — stop gracefully when limit reached
+      if (health.calls >= MAX_REQUESTS_PER_RUN) {
+        emit('status', { step: 'cap_reached',
+          message: `Request cap reached (${MAX_REQUESTS_PER_RUN} calls). Stopping to protect shared quota. Data saved so far.`,
+          progress: 100 });
+        console.log(`[CAP] Run stopped at ${health.calls} requests (limit: ${MAX_REQUESTS_PER_RUN})`);
+        break;
+      }
 
       if (r.success) {
         health.successes++;
@@ -852,6 +882,45 @@ cron.schedule('0 2 1 * *', async () => {
 
   } catch (err) {
     console.error('[CRON] Monthly run error:', err.message);
+  }
+}, { timezone: 'UTC' });
+
+// ── Weekly cron — every Monday at 02:00 AM UTC (skip if today is the 1st) ────
+// Keeps data fresh with smaller top-up runs. Skips on the 1st because the
+// monthly cron already runs a full fetch that day.
+cron.schedule('0 2 * * 1', async () => {
+  const today = new Date();
+  if (today.getUTCDate() === 1) {
+    console.log('[WEEKLY] Skipping — monthly cron runs today (1st of month)');
+    return;
+  }
+  const stamp = today.toISOString();
+  console.log(`\n[WEEKLY] ══════ Weekly refresh starting — ${stamp} ══════`);
+  try {
+    const cfg = await db.execute(`SELECT value FROM agent_config WHERE key='auto_run_enabled'`);
+    if (cfg.rows[0]?.value !== '1') { console.log('[WEEKLY] Auto-run disabled — skipping'); return; }
+
+    const { rows: ownRows } = await db.execute(`SELECT keyword FROM keywords WHERE active = 1 ORDER BY class, category`);
+    const ownKeywords   = ownRows.map(r => r.keyword);
+    const friendQueries = await getFriendSearchQueries({ maxRows: 300 });
+    const directHandles = await getFriendInfluencerHandles();
+
+    const seen   = new Set(ownKeywords.map(k => k.toLowerCase()));
+    const merged = [...ownKeywords];
+    for (const q of friendQueries) {
+      if (!seen.has(q.toLowerCase())) { seen.add(q.toLowerCase()); merged.push(q); }
+    }
+
+    console.log(`[WEEKLY] Queries: ${merged.length} total | Cap: ${MAX_REQUESTS_PER_RUN} requests`);
+    console.log(`[WEEKLY] Recent accounts (last 6 days) will be skipped to save quota`);
+
+    const nextRun = new Date(); nextRun.setDate(nextRun.getDate() + 7); nextRun.setHours(2, 0, 0, 0);
+    await db.execute({ sql: `UPDATE agent_config SET value=?, updated_at=datetime('now') WHERE key='next_run'`, args: [nextRun.toISOString()] });
+
+    const summary = await runAgent({ queries: merged, directHandles, triggeredBy: 'weekly_cron' });
+    console.log(`[WEEKLY] ══════ Complete — added:${summary.accountsAdded} updated:${summary.duplicatesSkipped} ══════\n`);
+  } catch (err) {
+    console.error('[WEEKLY] Error:', err.message);
   }
 }, { timezone: 'UTC' });
 

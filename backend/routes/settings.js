@@ -19,8 +19,9 @@ router.get('/keys', (req, res) => {
 router.post('/keys/test', async (req, res) => {
   const apiHost = process.env.RAPIDAPI_HOST || 'twitter-api45.p.rapidapi.com';
   const rawKeys = [
-    { label: 'Key1', key: process.env.RAPIDAPI_KEY },
-    { label: 'Key2', key: process.env.RAPIDAPI_KEY_BACKUP },
+    { label: 'Key1',    key: process.env.RAPIDAPI_KEY },
+    { label: 'Key2',    key: process.env.RAPIDAPI_KEY_BACKUP },
+    { label: 'KeyPaid', key: process.env.RAPIDAPI_KEY_PAID },
   ].filter(k => k.key);
 
   const results = [];
@@ -56,11 +57,13 @@ router.get('/', async (req, res) => {
       if (r.key.includes('key') || r.key.includes('token') || r.key.includes('secret')) continue;
       config[r.key] = r.value;
     }
-    config['openrouter_env_set']  = !!getKey();
-    config['model_chain']         = MODEL_CHAIN;
-    config['db_url']              = process.env.TURSO_URL ? 'connected' : 'NOT SET';
-    config['safe_rpm']            = 6;
-    config['friend_db_set']       = !!(process.env.FRIEND_TURSO_URL?.trim());
+    config['openrouter_env_set']   = !!getKey();
+    config['model_chain']          = MODEL_CHAIN;
+    config['db_url']               = process.env.TURSO_URL ? 'connected' : 'NOT SET';
+    config['safe_rpm']             = 6;
+    config['paid_key_set']         = !!(process.env.RAPIDAPI_KEY_PAID);
+    config['max_requests_per_run'] = Number(process.env.MAX_REQUESTS_PER_RUN) || 5000;
+    config['friend_db_set']        = !!(process.env.FRIEND_TURSO_URL?.trim());
     res.json({ config });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load settings' });
