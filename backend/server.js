@@ -94,9 +94,13 @@ async function humanBreak(emitStatus) {
   }
 }
 
-// Paid key only — no free keys
+// All configured keys — paid key + own keys as fallback
+// Paid key uses conservative RPM; own keys use standard RPM
+const SAFE_RPM = 6;
 const KEYS = [
-  { key: process.env.RAPIDAPI_KEY_PAID, label: 'KeyPaid', rpm: PAID_RPM },
+  { key: process.env.RAPIDAPI_KEY,        label: 'Key1',    rpm: SAFE_RPM },
+  { key: process.env.RAPIDAPI_KEY_BACKUP, label: 'Key2',    rpm: SAFE_RPM },
+  { key: process.env.RAPIDAPI_KEY_PAID,   label: 'KeyPaid', rpm: PAID_RPM },
 ].filter(k => k.key).map(({ key, label, rpm }) => ({
   key,
   label,
@@ -860,7 +864,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ── Weekly cron — every Monday at 02:00 AM UTC ───────────────────────────────
+// ── Weekly cron — every Monday at 02:00 AM IST (Indian Standard Time, UTC+5:30) ──
 // Only schedule — monthly cron removed. Weekly keeps data fresh.
 // Recent accounts (< 6 days old) are skipped to protect shared API quota.
 cron.schedule('0 2 * * 1', async () => {
@@ -892,7 +896,7 @@ cron.schedule('0 2 * * 1', async () => {
   } catch (err) {
     console.error('[WEEKLY] Error:', err.message);
   }
-}, { timezone: 'UTC' });
+}, { timezone: 'Asia/Kolkata' });
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 initDB().then(async () => {
@@ -904,7 +908,7 @@ initDB().then(async () => {
     console.log(`  http://localhost:${PORT}`);
     console.log(`  Turso:    ${process.env.TURSO_URL ? 'connected' : 'NOT SET'}`);
     console.log(`  OpenRouter: ${process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY !== 'your_openrouter_key_here' ? 'key set ✓' : 'NOT SET'}`);
-    console.log(`  Weekly cron:  active (every Monday, 02:00 UTC)`);
+    console.log(`  Weekly cron:  active (every Monday, 02:00 IST / Asia/Kolkata)`);
     console.log(`  Request cap: ${MAX_REQUESTS_PER_RUN}/run | Anti-bot: jitter ±3s + human breaks`);
     console.log(`\n  RapidAPI keys (no quota burned on startup):`);
     validateKeys();
