@@ -157,7 +157,12 @@ function validateKeys() {
       console.log(`  ${k.label}: ✓ configured (will test on first use)`);
     }
   }
-  console.log(`  Keys configured: ${KEYS.filter(k => !k.disabled).map(k => k.label).join(', ')}`);
+  const activeKeys = KEYS.filter(k => !k.disabled);
+  if (activeKeys.length === 0) {
+    console.log('  ⚠️  WARNING: No API keys configured! Set RAPIDAPI_KEY_PAID in environment variables.');
+  } else {
+    console.log(`  Keys configured: ${activeKeys.map(k => k.label).join(', ')}`);
+  }
 }
 
 // Track global consecutive 429s — 3+ in a row = daily quota exhausted
@@ -189,7 +194,11 @@ async function acquireKey(emitStatus, sseKeepAlive) {
 
     // Bail out if ALL non-disabled keys have been 429'd more than threshold
     const activeKeys = KEYS.filter(k => !k.disabled); // disabled = invalid key format only
-    if (activeKeys.length === 0) throw new QuotaExhaustedError('All API keys are disabled');
+    if (activeKeys.length === 0) throw new QuotaExhaustedError(
+      KEYS.length === 0
+        ? 'No API keys configured — set RAPIDAPI_KEY_PAID in Render environment variables'
+        : 'All API keys are disabled or in cooldown'
+    );
     if (globalConsecutive429 >= QUOTA_EXHAUSTED_THRESHOLD) {
       throw new QuotaExhaustedError(
         `API daily quota exhausted after ${globalConsecutive429} consecutive rate-limits. ` +
