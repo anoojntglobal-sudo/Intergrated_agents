@@ -46,6 +46,56 @@ function RunRow({ run }) {
   );
 }
 
+function LastRunCard({ run }) {
+  if (!run) return null;
+  const statusColor = run.status === 'completed' ? 'var(--green)'
+    : run.status === 'running' ? 'var(--blue)'
+    : run.status === 'quota_exhausted' ? 'var(--gold)' : 'var(--red)';
+  const statusLabel = run.status === 'quota_exhausted' ? 'quota exhausted' : run.status;
+  const date = run.startedAt ? new Date(run.startedAt) : null;
+  const dateStr = date
+    ? `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : '';
+
+  return (
+    <div className="dash-card" style={{ marginBottom: 16 }}>
+      <div className="dash-card-header">
+        <h3>Last Run Summary</h3>
+        <span style={{ fontSize: 13, color: 'var(--text2)' }}>
+          #{run.runId} · {run.triggeredBy} ·{' '}
+          <span style={{ color: statusColor, textTransform: 'capitalize' }}>{statusLabel}</span>
+          {dateStr ? ` · ${dateStr}` : ''}
+        </span>
+      </div>
+
+      {/* What was fetched this run */}
+      <div className="stat-grid" style={{ marginBottom: 14 }}>
+        <StatCard label="Fetched this run" value={run.totalFetched}    color="var(--blue)"  icon="◉" />
+        <StatCard label="New accounts"     value={run.newAccounts}     color="var(--green)" icon="＋" />
+        <StatCard label="Re-checked"       value={run.updatedAccounts} color="#888"         icon="↻" />
+      </div>
+
+      {/* How they were classified into the pipeline */}
+      <div style={{ fontSize: 12, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '.5px', marginBottom: 10 }}>
+        Classified into pipeline
+      </div>
+      <div className="stat-grid">
+        <StatCard label="A1 · confirmed paid" value={run.a1}     color="var(--green)" icon="✓" />
+        <StatCard label="A2 · likely paid"    value={run.a2}     color="var(--gold)"  icon="◐" />
+        <StatCard label="Track B · ads"       value={run.trackB} color="#C084FC"      icon="◎" />
+        <StatCard label="Other · unbadged"    value={run.other}  color="#888"         icon="·" />
+      </div>
+
+      {run.totalFetched === 0 && (
+        <div className="track-note" style={{ marginTop: 12 }}>
+          No accounts saved this run — most candidates were skipped (refreshed within the last 6 days)
+          or the run stopped before finishing.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TopAccountCard({ account }) {
   const handle = (account.handle || '').replace(/^@/, '');
   return (
@@ -88,6 +138,7 @@ export default function Dashboard() {
   const { apiFetch }             = useAuth();
   const { running, onRunComplete } = useAgent();
   const [stats,      setStats]      = useState(null);
+  const [lastRun,    setLastRun]    = useState(null);
   const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error,      setError]      = useState('');
@@ -97,10 +148,13 @@ export default function Dashboard() {
   function loadStats(isRefresh = false) {
     if (isRefresh) setRefreshing(true); else setLoading(true);
     setError('');
-    apiFetch('/api/dashboard/stats')
-      .then(r => r.json())
-      .then(d => {
+    Promise.all([
+      apiFetch('/api/dashboard/stats').then(r => r.json()),
+      apiFetch('/api/dashboard/last-run').then(r => r.json()).catch(() => ({ lastRun: null })),
+    ])
+      .then(([d, lr]) => {
         setStats(d);
+        setLastRun(lr?.lastRun || null);
         setLastFetch(new Date());
         setLoading(false);
         setRefreshing(false);
@@ -171,6 +225,9 @@ export default function Dashboard() {
         <StatCard label="DM Open"        value={t.dm_open}   color="#F9A825" icon="💬" />
         <StatCard label="Has Email"      value={t.has_email} color="#C084FC" icon="✉" />
       </div>
+
+      {/* Last run breakdown — total fetched + A1/A2/B split */}
+      <LastRunCard run={lastRun} />
 
       {/* Charts row */}
       <div className="dash-grid">

@@ -45,6 +45,60 @@ router.get('/stats', async (req, res) => {
   }
 });
 
+// GET /api/dashboard/last-run — per-run breakdown of the most recent run.
+// Computed from accounts.run_id (set on every fetch/save) so it's accurate even
+// if the run record never finalized (e.g. dev server restart mid-run).
+router.get('/last-run', async (req, res) => {
+  try {
+    const runRes = await db.execute(
+      `SELECT id, started_at, completed_at, status, triggered_by
+       FROM runs ORDER BY id DESC LIMIT 1`
+    );
+    if (!runRes.rows.length) return res.json({ lastRun: null });
+    const run   = runRes.rows[0];
+    const runId = run.id;
+
+    const [totalRow, breakdown, newRow] = await Promise.all([
+      db.execute({ sql: `SELECT COUNT(*) n FROM accounts WHERE run_id = ?`, args: [runId] }),
+      db.execute({
+        sql: `SELECT
+                SUM(CASE WHEN track='A' AND promotion_type='explicit' THEN 1 ELSE 0 END) a1,
+                SUM(CASE WHEN track='A' AND promotion_type='inferred' THEN 1 ELSE 0 END) a2,
+                SUM(CASE WHEN track='B'                                THEN 1 ELSE 0 END) trackB,
+                SUM(CASE WHEN track='A' AND promotion_type IN ('none','unknown') THEN 1 ELSE 0 END) other
+              FROM accounts WHERE run_id = ?`,
+        args: [runId],
+      }),
+      db.execute({ sql: `SELECT COUNT(*) n FROM accounts WHERE run_id = ? AND first_seen >= ?`,
+                   args: [runId, run.started_at] }),
+    ]);
+
+    const b            = breakdown.rows[0] || {};
+    const totalFetched = Number(totalRow.rows[0].n);
+    const newAccounts  = Number(newRow.rows[0].n);
+
+    res.json({
+      lastRun: {
+        runId,
+        triggeredBy:     run.triggered_by,
+        status:          run.status,
+        startedAt:       run.started_at,
+        completedAt:     run.completed_at,
+        totalFetched,                              // new + refreshed this run
+        newAccounts,
+        updatedAccounts: Math.max(0, totalFetched - newAccounts),
+        a1:     Number(b.a1)     || 0,             // Track A — explicit (confirmed paid)
+        a2:     Number(b.a2)     || 0,             // Track A — inferred (likely paid)
+        trackB: Number(b.trackB) || 0,             // Track B — ads audience
+        other:  Number(b.other)  || 0,             // Track A — none/unknown (unbadged)
+      },
+    });
+  } catch (err) {
+    console.error('last-run error:', err);
+    res.status(500).json({ error: 'Failed to load last run' });
+  }
+});
+
 // GET /api/dashboard/runs
 router.get('/runs', async (req, res) => {
   try {
