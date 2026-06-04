@@ -69,8 +69,8 @@ Why ratio matters: high ratio = organic growth, not follow-back spam.`,
 <500  = Very Low → 10`,
       },
       {
-        title: 'D2 + D3 — AI Scoring Prompt (Claude Opus 4.5)',
-        context: 'The batch prompt sent to Claude for 6 accounts at a time',
+        title: 'D2 + D3 — AI Scoring Prompt (Gemini 2.5 Flash)',
+        context: 'The batch prompt sent to Gemini for 6 accounts at a time (fallback: Claude Haiku 4.5)',
         prompt: `KiteAI — voice AI company. Score these X accounts for influencer/PR outreach.
 
 D2 Collab Intent (0-100):
@@ -104,7 +104,7 @@ Return ONLY JSON array, same order as input.`,
         context: 'Combining all 4 dimensions into overall score',
         prompt: `Overall = D2 × 0.25  +  D3 × 0.25  +  D4 × 0.20  +  D5 × 0.30
 
-D2 and D3 come from Claude AI (reads bio + name).
+D2 and D3 come from Gemini 2.5 Flash (reads bio + name).
 D4 and D5 are algorithmic (from raw follower numbers).
 
 Track enforcement (overrides AI):
@@ -118,51 +118,91 @@ This prevents inconsistencies like AI saying "PR Page" but track "A".`,
     id: 'promotion',
     label: 'Track A1/A2 Classification',
     color: '#F9A825',
-    description: 'Detecting which accounts are available for paid collab',
+    description: 'Evidence-based paid-promoter detection — learn the paid-post pattern, then check each post',
     prompts: [
       {
         title: 'Core Classification Logic',
-        context: 'The key insight: ambassador ≠ available for our collab',
+        context: 'The key insight: ambassador ≠ available, own-brand founder ≠ promoter',
         prompt: `The key question: is this account AVAILABLE for paid collaborations with KiteAI?
 
 A1 (confirmed available):
 - "DM for collabs", "DM for paid promo", "open to brand deals"
 - "media kit", "UGC creator", "content creator for hire"
 - collab@email, partnerships@email
-- #ad or #sponsored in bio
+- #ad / #sponsored / "paid partnership" in bio OR a post
 
-NOT A1 (single-brand exclusive):
-- "Ambassador @brand" → works for one brand only, not available for us
-- "Official X ambassador" → brand exclusive
-- "Brand ambassador for Y" → employed by that brand
+A2 (likely — detected by post PATTERN, must have quoted evidence):
+- Promotes ≥2 DIFFERENT brands with CTAs/links
+- Discount codes ("use code X"), affiliate links (?ref=, link in bio)
+- Brand giveaways ("RT + follow @X to win")
 
-A2 (inferred from tweets):
-- #ad, #sponsored, #gifted in tweets
-- Discount codes ("use code X")
-- "I partnered with [Brand]", "gifted by [Brand]"
-- Multiple different brand reviews with CTAs`,
+NOT a hireable promoter (→ none / unknown):
+- "Ambassador @brand" / "Official X ambassador" → single-brand exclusive
+- Founder promoting only their OWN product → a brand, not for hire
+- Researcher / journalist / pure technical threads → organic`,
       },
       {
-        title: 'Tweet Analysis Prompt (Claude)',
-        context: 'Sent when bio analysis is inconclusive — fetches from:username tweets',
-        prompt: `Is @{handle} AVAILABLE for paid brand collaborations with new brands?
+        title: 'Paid-Post Pattern Detector (Gemini 2.5 Flash)',
+        context: 'Replaces the old vague "is this paid?" check — defines what a paid POST looks like, requires quoted evidence',
+        prompt: `You are a sponsored-content detector for KiteAI (hires influencers for PAID promotions).
+GOAL: Decide if @{handle} takes money/products to promote OTHER companies' products.
 
 Bio: "{bio}"
+Auto-detected signals → disclosures:N codes:N affiliate-links:N giveaways:N brand+CTA:N | distinct brands:N
+Recent posts:
+{20 original posts, retweets skipped}
 
-Recent tweets:
-{tweet1}
-{tweet2}
-...{tweet10}
+=== HOW A PAID POST LOOKS (learn this pattern) ===
+PAID:
+  "Loving my setup from @brandX — use code SAVE20, link in bio #ad"   → explicit (disclosure + code)
+  "Thanks @toolY for sponsoring. Sign up: site.com/?ref=me"           → explicit (sponsor + affiliate)
+  "Testing @appA and @appB this month, both great — try them 👇"      → inferred (2 brands + CTA)
+NOT PAID:
+  "Debugging our inference stack — here's what I learned 🧵"           → none (technical)
+  "We just shipped v2 of OUR product 🚀"                              → none (own company, not for hire)
 
-KEY QUESTION: Does this account actively do paid promotions with MULTIPLE brands?
-NOT what we want: accounts that exclusively represent one brand (official ambassadors).
+=== RULES (no compromise) ===
+- explicit: ≥1 post has a clear disclosure OR code/affiliate for someone else
+- inferred: no tag, but a pattern — ≥2 different brands w/ CTAs, or brand giveaways
+- none: technical/research/journalism/personal, OR only their OWN product
+- unknown: too few posts / no signal — do NOT guess
+- EVERY explicit/inferred verdict MUST quote the exact post that proves it
 
-Explicit: #ad, #sponsored, #gifted, discount codes, "I partnered with [Brand]",
-  "Thank you [Brand] for sending", product reviews + CTA
-Inferred: Review-style posts about multiple DIFFERENT brands, unboxing,
-  giveaways with brands, "link in bio" + brand, affiliate patterns
+Return ONLY JSON: {"promotion_type":"explicit|inferred|none|unknown","confidence":0-100,"signals":["<reason + quoted post>"],"brands":["@b1","@b2"]}`,
+      },
+      {
+        title: 'Cheap Regex Pre-Scan (free, before AI)',
+        context: 'Each post is scanned for signals first — backstop + brand-spread count',
+        prompt: `scanPostsForSignals(posts) flags each post (no API/AI cost):
 
-Return ONLY JSON: {"promotion_type":"explicit"|"inferred"|"none","confidence":0-100,"signals":["..."]}`,
+DISCLOSURE → A1:  #ad #sponsored #spon #paidpartnership "sponsored by" "in partnership with"
+CODE → A2:        "use code X" "20% off" promo/discount/coupon code
+AFFILIATE → A2:   ?ref= utm_ amzn.to bit.ly "link in bio to shop" "commission"
+GIVEAWAY → A2:    "giveaway" "RT + follow to win" "enter to win"
+BRAND+CTA → A2:   @mention + (try|sign up|get yours|shop|grab|claim)
+
+Also counts DISTINCT brands across promo posts (≥2 = serial-promoter pattern).
+
+Quality backstops:
+- A real #ad/#sponsored tag can NEVER be rated below A1 (regex override on the AI)
+- If the AI call fails → fall back to these regex signals
+- Output feeds the Gemini prompt as "Auto-detected signals" for calibration`,
+      },
+      {
+        title: 'Resolve Unknowns Backfill',
+        context: 'One-pass job to re-classify the entire unknown/none backlog',
+        prompt: `Most accounts predate the detector and sit as unknown/none.
+GET /api/resolve-unknowns (SSE) re-runs the detector over the backlog:
+
+1. SELECT handle,bio FROM accounts
+   WHERE track='A' AND promotion_type IN ('unknown','none')
+   ORDER BY overall DESC          ← relevant accounts first
+2. For each: fetch 20 posts → analysePaidPattern → UPDATE if resolved
+3. Same 3 RPM anti-bot pacing + 5,000/run cap. Abortable, progress saved.
+4. Stream live tally: { toA1, toA2, toNone, stillUnknown, processed, total }
+
+Live agent does this too: stale unknown/none duplicates are re-checked on
+every refresh, so the backlog shrinks automatically over time.`,
       },
     ],
   },
@@ -334,6 +374,26 @@ Sort uses: promoOrder = { explicit: 0, inferred: 1, none: 2, unknown: 3 }
 The filter converts null/undefined promotion_type to 'unknown':
   const pt = a.promotion_type || 'unknown'
 This prevents null values (accounts scored before feature existed) from breaking filters.`,
+      },
+      {
+        title: 'Last Run Summary Card',
+        context: 'Dashboard card showing the most recent run’s totals + A1/A2/B split',
+        prompt: `Show a per-run breakdown on the Dashboard: total fetched last run,
+and how they split into A1 / A2 / Track B / Other.
+
+Why compute from accounts.run_id (not the runs table)?
+- upsertAccount sets run_id on every fetch/save (insert AND update)
+- So COUNT(*) WHERE run_id = lastRunId = everything touched that run
+- Accurate even when the run record never finalized (dev restart mid-run)
+
+GET /api/dashboard/last-run returns:
+  { runId, status, totalFetched, newAccounts, updatedAccounts,
+    a1, a2, trackB, other }
+  a1 = run_id=last AND track='A' AND promotion_type='explicit'
+  a2 = ...'inferred'   trackB = track='B'   other = A none/unknown
+  newAccounts = run_id=last AND first_seen >= run.started_at
+
+Card auto-refreshes on the onRunComplete hook + manual refresh.`,
       },
     ],
   },

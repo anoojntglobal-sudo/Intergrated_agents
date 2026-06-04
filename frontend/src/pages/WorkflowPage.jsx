@@ -263,8 +263,10 @@ export default function WorkflowPage() {
        ▼
   PROMOTION CLASSIFICATION (per Track A account, inline during fetch)
        │  Phase 1: Bio keywords (free) ──► A1 if explicit signal, or exclusion (ambassador)
-       │  Phase 2: Tweet fetch /search?query=from:handle&count=10&type=Latest
-       │           Claude reads tweets ──► A1 (explicit) or A2 (inferred) or unknown
+       │  Phase 2: Fetch 20 posts /search?query=from:handle&count=20&type=Latest
+       │           PAID-POST PATTERN DETECTOR (regex signals + Gemini, quoted evidence)
+       │           ──► A1 (disclosure/code) · A2 (multi-brand pattern) · none · unknown
+       │           Stale unknown/none duplicates are re-checked on every refresh
        ▼
   SCORE MERGE ─── Overall = D2×25% + D3×25% + D4×20% + D5×30%
        │           Track A sort: A1 (💰) → A2 (~) → Unknown  |  Track B: ads audience
@@ -272,7 +274,12 @@ export default function WorkflowPage() {
   DB UPSERT ─── Turso  |  handle UNIQUE → INSERT or UPDATE
        │         promotion_type · promotion_confidence · promotion_signals saved
        ▼
-  SSE COMPLETE ─── accountsAdded · duplicatesSkipped · totalInDB · confirmedPaid · likelyPaid`}</pre>
+  SSE COMPLETE ─── accountsAdded · duplicatesSkipped · totalInDB · confirmedPaid · likelyPaid
+       │           Dashboard "Last Run Summary" card: fetched + A1/A2/B/Other split
+       ▼
+  RESOLVE UNKNOWNS (on-demand backfill) ─── /api/resolve-unknowns
+       │           Re-runs the paid-post detector over ALL unknown/none Track A
+       │           accounts → promotes real promoters into A1/A2. Live tally streamed.`}</pre>
       </div>
 
       {/* ── Steps ───────────────────────────────────────────────── */}
@@ -593,6 +600,8 @@ export default function WorkflowPage() {
                 <Code>d3</Code> — AI Relevance 0-100<br />
                 <Code>type</Code> — Influencer | PR Page | AI Media | Brand Page | Account<br />
                 <Code>track</Code> — A (collab pipeline) | B (ads audience)<br />
+                <Code>promotion_type</Code> — explicit | inferred | none | unknown (from bio)<br />
+                <Code>promotion_signals</Code> — up to 3 detected signals<br />
                 <Code>model</Code> — added by JS layer
               </div>
             </InfoBox>
@@ -749,78 +758,111 @@ export default function WorkflowPage() {
         <Arrow />
 
         {/* TRACK A PROMOTION CLASSIFICATION — A1 / A2 */}
-        <Card color={C.purple} title="TRACK A PROMOTION CLASSIFICATION — A1 / A2 (Inline During Fetch)">
+        <Card color={C.purple} title="TRACK A PROMOTION CLASSIFICATION — Evidence-Based Paid-Post Detector">
           <InfoBox color={C.purple} style={{ marginBottom: 14 }}>
-            Every new Track A account is classified inline during the agent run — no separate step.
-            3 phases run automatically. The key question: <strong>is this account available for paid collab with KiteAI?</strong>
+            Every Track A account is classified inline during the run — no separate step. Instead of
+            asking "is this account paid?", we define <strong>what a paid POST looks like</strong>, scan each
+            recent post for those signals, then let Gemini make an <strong>evidence-based verdict that must
+            quote the post proving it.</strong> Key question: <em>is this account available for paid collab with KiteAI?</em>
           </InfoBox>
 
           <Row gap={12} style={{ marginBottom: 14 }}>
             <InfoBox color={C.green} style={{ flex: 1 }}>
-              <div style={{ fontWeight:700, color:C.green, marginBottom:6 }}>💰 A1 — Confirmed (bio explicit)</div>
-              Bio signals they are OPEN to new paid work with any brand:<br />
-              <Code>"DM for collabs"</Code> · <Code>"DM for paid promo"</Code><br />
-              <Code>"open to brand deals"</Code> · <Code>"media kit"</Code><br />
-              <Code>"UGC creator"</Code> · <Code>collab@email.com</Code><br />
-              <Code>#ad</Code> in bio · <Code>"sponsored content"</Code><br /><br />
-              <strong>Skip tweet fetch</strong> — bio already confirms, saves 1 API call
+              <div style={{ fontWeight:700, color:C.green, marginBottom:6 }}>💰 A1 — Confirmed (explicit)</div>
+              Bio OR a post clearly discloses paid work with any brand:<br />
+              <Code>"DM for collabs"</Code> · <Code>"media kit"</Code> · <Code>collab@email</Code><br />
+              <Code>#ad</Code> · <Code>#sponsored</Code> · <Code>"paid partnership"</Code><br />
+              discount code / affiliate link promoting someone else<br /><br />
+              Bio-explicit → <strong>skip post fetch</strong> (already confirmed)
             </InfoBox>
             <InfoBox color={C.gold} style={{ flex: 1 }}>
-              <div style={{ fontWeight:700, color:C.gold, marginBottom:6 }}>~ A2 — Likely (tweet analysis)</div>
-              No explicit bio signal → fetch 10 tweets → Claude reads for:<br />
-              <Code>#ad</Code> · <Code>#sponsored</Code> · <Code>#gifted</Code><br />
-              "use code X" · discount codes<br />
-              "I partnered with [Brand]" · "gifted by [Brand]"<br />
-              Multiple different brand reviews + CTA<br /><br />
-              <strong>1 extra API call</strong> per inconclusive account
+              <div style={{ fontWeight:700, color:C.gold, marginBottom:6 }}>~ A2 — Likely (post pattern)</div>
+              No explicit tag, but a clear PATTERN across posts:<br />
+              promotes <strong>≥2 DIFFERENT brands</strong> with CTAs/links<br />
+              repeated product-review + link structure<br />
+              brand giveaways ("RT + follow @X to win")<br /><br />
+              Verdict requires <strong>quoted evidence</strong> — never a guess
             </InfoBox>
           </Row>
 
-          <div style={{ background:'#0d1117', borderRadius:6, padding:'12px 14px', fontFamily:'monospace', fontSize:11, lineHeight:1.9, marginBottom:12 }}>
-            <div style={{ color:C.red, marginBottom:6, fontWeight:700 }}>EXCLUSION CHECK (runs first — no A1/A2 assigned):</div>
-            <div style={{ paddingLeft:16, color:'#a5d6ff' }}>
-              "Ambassador @glider__ &bull; @cyfrin" → EXCLUDED (works for specific brands)<br />
-              "Official Raycon Ambassador"           → EXCLUDED (single-brand exclusive)<br />
-              "Brand ambassador for [Brand]"         → EXCLUDED (can't promote our product)<br />
-              These people are locked to one brand — not available for KiteAI collab<br />
+          {/* Detector signal tiers */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.muted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>
+              Paid-Post Signals (cheap regex scan, free — then AI confirms)
             </div>
-            <div style={{ color:C.gold, marginTop:10, marginBottom:6, fontWeight:700 }}>TWEET FETCH REQUEST (when bio inconclusive):</div>
-            <div style={{ paddingLeft:16, color:'#a5d6ff' }}>
-              GET https://twitter241.p.rapidapi.com/search?query=from%3Ahasantoxr&count=10&type=Latest<br />
-              URL-encoded: from:hasantoxr → from%3Ahasantoxr<br />
-            </div>
-            <div style={{ color:C.gold, marginTop:10, marginBottom:6, fontWeight:700 }}>UPGRADE LOGIC:</div>
-            <div style={{ paddingLeft:16, color:'#a5d6ff' }}>
-              Bio says 'inferred' + tweets say 'explicit' → upgrade to A1<br />
-              Bio says 'unknown' + tweets say 'inferred' → set to A2<br />
-              Bio says 'explicit' → A1, skip tweet fetch entirely<br />
-              After both checks still unknown → save to DB as unknown (hidden from A1/A2 filter)<br />
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8 }}>
+              {[
+                ['Disclosure → A1', '#ad · #sponsored · "paid partnership" · "sponsored by"', C.green],
+                ['Discount code → A2', '"use code SAVE20" · "20% off" · promo/coupon code', C.gold],
+                ['Affiliate link → A2', '?ref= · utm_ · amzn.to · bit.ly · "link in bio to shop"', C.gold],
+                ['Brand + CTA → A2', '@brand mention + "try / sign up / get yours / shop"', C.gold],
+                ['Giveaway → A2', '"giveaway" · "RT + follow to win" · brand prize', C.gold],
+                ['Distinct-brand count', '≥2 different brands promoted = serial-promoter pattern', C.purple],
+              ].map(([label, ex, col]) => (
+                <div key={label} style={{ background:C.bg, border:`1px solid ${col}33`, borderLeft:`3px solid ${col}`, borderRadius:6, padding:'8px 10px', fontSize:11 }}>
+                  <div style={{ color:col, fontWeight:700, marginBottom:3 }}>{label}</div>
+                  <div style={{ color:C.muted, fontFamily:'monospace', fontSize:10, lineHeight:1.5 }}>{ex}</div>
+                </div>
+              ))}
             </div>
           </div>
 
-          <table style={{ width:'100%', borderCollapse:'collapse', fontSize:11 }}>
-            <thead><tr><th style={{background:'#1a56a0',color:'#fff',padding:'5pt 8pt',textAlign:'left'}}>Bio says</th>
-              <th style={{background:'#1a56a0',color:'#fff',padding:'5pt 8pt',textAlign:'left'}}>Result</th>
-              <th style={{background:'#1a56a0',color:'#fff',padding:'5pt 8pt',textAlign:'left'}}>Action</th></tr></thead>
-            <tbody>
-              {[
-                ['"DM for collabs"',           '💰 A1',       'Contact directly'],
-                ['"open to paid sponsorships"','💰 A1',       'Contact directly'],
-                ['"Ambassador @glider__"',     '❌ Excluded', 'Single-brand, skip A1/A2'],
-                ['Bio unclear → #ad in tweets','~ A2',        'Contact (likely paid)'],
-                ['No signals in bio OR tweets','? Unknown',   'Saved to DB, hidden from filter'],
-              ].map(([bio,res,act],i) => (
-                <tr key={i}><td style={{padding:'4pt 8pt',border:'1px solid #ccc',background:i%2?'#f0f5ff':'#fff'}}>{bio}</td>
-                  <td style={{padding:'4pt 8pt',border:'1px solid #ccc',background:i%2?'#f0f5ff':'#fff',fontWeight:700}}>{res}</td>
-                  <td style={{padding:'4pt 8pt',border:'1px solid #ccc',background:i%2?'#f0f5ff':'#fff',color:'#555'}}>{act}</td></tr>
-              ))}
-            </tbody>
-          </table>
+          <div style={{ background:'#0d1117', borderRadius:6, padding:'12px 14px', fontFamily:'monospace', fontSize:11, lineHeight:1.9, marginBottom:12 }}>
+            <div style={{ color:C.red, marginBottom:6, fontWeight:700 }}>EXCLUSIONS — these are NOT hireable promoters (→ none / unknown):</div>
+            <div style={{ paddingLeft:16, color:'#a5d6ff' }}>
+              "Official Raycon Ambassador" / "Brand ambassador for X" → single-brand exclusive<br />
+              Founder promoting only their OWN product → a brand, not for hire<br />
+              Researcher / journalist / pure technical threads → organic, not paid<br />
+            </div>
+            <div style={{ color:C.gold, marginTop:10, marginBottom:6, fontWeight:700 }}>POST FETCH (when bio inconclusive — 20 original posts, RTs skipped):</div>
+            <div style={{ paddingLeft:16, color:'#a5d6ff' }}>
+              GET https://twitter241.p.rapidapi.com/search?query=from%3Ahasantoxr&count=20&type=Latest<br />
+            </div>
+            <div style={{ color:C.gold, marginTop:10, marginBottom:6, fontWeight:700 }}>QUALITY BACKSTOPS:</div>
+            <div style={{ paddingLeft:16, color:'#a5d6ff' }}>
+              A real #ad/#sponsored tag can NEVER be rated below A1 (regex override)<br />
+              If the AI call fails → fall back to the regex signals<br />
+              Still unresolved → saved as unknown (hidden from A1/A2 filter)<br />
+              Stale unknown/none duplicates are re-checked on every refresh run<br />
+            </div>
+          </div>
 
-          <InfoBox color={C.muted} style={{ marginTop:12, fontSize:11 }}>
-            <strong>DB sort order (Track A endpoint):</strong><br />
+          <InfoBox color={C.muted} style={{ fontSize:11 }}>
+            <strong>DB sort order (Track A endpoint):</strong>{' '}
             <Code>ORDER BY CASE promotion_type WHEN 'explicit' THEN 0 WHEN 'inferred' THEN 1 ELSE 2 END, overall DESC</Code><br />
-            A1 first → A2 → Unknown. UI filter shows only A1 and A2 chips (Unknown hidden).
+            A1 first → A2 → Unknown. UI shows only A1 and A2 chips (Unknown/none hidden).
+          </InfoBox>
+        </Card>
+
+        <Arrow />
+
+        {/* RESOLVE UNKNOWNS — backfill */}
+        <Card color={C.purple} title="RESOLVE UNKNOWNS — On-Demand Backfill of the Unbadged Backlog">
+          <InfoBox color={C.purple} style={{ marginBottom: 14 }}>
+            Most accounts in the DB predate the paid-post detector and sit as <Code>unknown</Code>/<Code>none</Code>.
+            The <strong>Resolve Unbadged Accounts</strong> button on the Track A page re-runs the detector over the
+            entire backlog (relevant-first), promoting real promoters into A1/A2. Streams live progress.
+          </InfoBox>
+          <Row gap={12} style={{ marginBottom: 12 }}>
+            <InfoBox color={C.blue} style={{ flex: 1 }}>
+              <div style={{ fontWeight:700, color:C.blue, marginBottom:6 }}>How it runs</div>
+              Endpoint: <Code>GET /api/resolve-unknowns</Code> (SSE)<br />
+              Selects <Code>track='A' AND promotion_type IN ('unknown','none')</Code>, ORDER BY overall DESC<br />
+              For each: fetch 20 posts → paid-post detector → UPDATE if resolved<br />
+              Same 3 RPM anti-bot pacing + 5,000/run cap. Abortable, progress saved.
+            </InfoBox>
+            <InfoBox color={C.green} style={{ flex: 1 }}>
+              <div style={{ fontWeight:700, color:C.green, marginBottom:6 }}>Live tally (SSE)</div>
+              <Code>start</Code> → total count<br />
+              <Code>status</Code> → current account + progress %<br />
+              <Code>account</Code> → running <Code>{'{ toA1, toA2, toNone, stillUnknown, processed }'}</Code><br />
+              <Code>complete</Code> → final summary, list reloads automatically
+            </InfoBox>
+          </Row>
+          <InfoBox color={C.gold} style={{ fontSize: 11 }}>
+            <strong>Dashboard "Last Run Summary" card</strong> shows the most recent run's totals computed from
+            <Code>accounts.run_id</Code>: fetched this run, new vs re-checked, and the A1 / A2 / Track B / Other split —
+            accurate even if the run record never finalized.
           </InfoBox>
         </Card>
 
@@ -991,8 +1033,21 @@ export default function WorkflowPage() {
             returns="{ accounts[] } — track='A', overall DESC, LIMIT 1000" />
           <RouteRow method="GET" path="/api/accounts/pr-pages" auth={true}
             returns="{ accounts[] } — track='B', overall DESC, LIMIT 1000" />
+          <RouteRow method="GET" path="/api/accounts/promotion-stats" auth={true}
+            returns="{ a1, a2, none, unknown, resolvable } — Track A counts by promotion_type" />
+          <RouteRow method="DELETE" path="/api/accounts/cleanup" auth={true}
+            returns="Deletes overall<20 AND d3<15 → { deleted, remaining }" />
           <RouteRow method="GET" path="/api/accounts/:handle" auth={true}
             returns="{ account } or 404 — handle lowercased before lookup" />
+
+          {/* Dashboard */}
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.blue, margin: '16px 0 8px', letterSpacing: 0.5 }}>DASHBOARD</div>
+          <RouteRow method="GET" path="/api/dashboard/stats" auth={true}
+            returns="{ totals, byType, byTier, byTrack, topAccounts, recentRuns, config }" />
+          <RouteRow method="GET" path="/api/dashboard/last-run" auth={true}
+            returns="{ lastRun: { totalFetched, newAccounts, updatedAccounts, a1, a2, trackB, other } } — from run_id" />
+          <RouteRow method="GET" path="/api/resolve-unknowns" auth={true}
+            returns="text/event-stream — re-runs paid-post detector over unknown/none Track A. Live A1/A2 tally." />
 
           {/* Keywords */}
           <div style={{ fontSize: 12, fontWeight: 700, color: C.green, margin: '16px 0 8px', letterSpacing: 0.5 }}>KEYWORDS</div>
