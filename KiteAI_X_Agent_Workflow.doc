@@ -46,6 +46,7 @@ Schedule: Weekly Monday 02:00 IST &nbsp;|&nbsp; Cap: 5,000 req/run &nbsp;|&nbsp;
 <li>Resolve Unknowns backfill — re-classify the unknown/none Track A backlog into A1/A2</li>
 <li>Stale unknown/none duplicates re-checked on every refresh run</li>
 <li>Dashboard Last Run Summary card (fetched + A1/A2/B/Other split, from run_id)</li>
+<li>A2 content-authenticity scoring (0-100): split A2 into ✦ Genuine vs ⚠ Salesy creators</li>
 <li>Brand ambassador exclusion (not available for our collab)</li>
 <li>DB-level sort: A1 → A2 → Unknown in Track A endpoint</li>
 <li>~1,000-1,200 new accounts per full run</li>
@@ -441,6 +442,29 @@ After both checks, still unknown → save to DB as unknown (not shown in A1/A2 f
 <tr><td>No signals in bio or tweets</td><td><span class="tag tag-y">Unknown</span></td><td>Saved to DB, hidden from A1/A2 filter</td></tr>
 </table>
 
+<h3>STEP 9b — A2 Content Authenticity (Genuine Creators vs Salesy/Templated)</h3>
+<p>A2 is split by content quality so it stays a clean list of <b>genuine creators</b> whose product posts an audience would trust — not hyped-up ads or AI/templated spam. Every A2 account gets an <b>authenticity score 0-100</b> (Gemini reading 20 posts, blended 70% AI + 30% regex hint), with the single most genuine post quoted as evidence.</p>
+<table>
+<tr><th>Signal</th><th>Effect</th><th>Examples</th></tr>
+<tr><td>First-person lived experience</td><td><span class="tag tag-g">RAISES</span></td><td>"I've been using…", "switched to…", "after 2 weeks…"</td></tr>
+<tr><td>Specific details</td><td><span class="tag tag-g">RAISES</span></td><td>real features, timeframes, concrete use-case</td></tr>
+<tr><td>Honest / balanced</td><td><span class="tag tag-g">RAISES</span></td><td>admits a downside, "skeptical at first"</td></tr>
+<tr><td>Hype overload</td><td><span class="tag tag-y">LOWERS</span></td><td>ALL CAPS, 🚀🔥, "BEST EVER"</td></tr>
+<tr><td>Generic / templated</td><td><span class="tag tag-y">LOWERS</span></td><td>interchangeable praise, repeated structure</td></tr>
+<tr><td>Pure CTA / robotic</td><td><span class="tag tag-y">LOWERS</span></td><td>"buy now, link in bio", no personal voice</td></tr>
+</table>
+<pre>BUCKETS (threshold GENUINE_THRESHOLD = 60):
+  ✦ A2 — Genuine    authenticity_score >= 60   (the clean curated list)
+  ◷ A2 — Unscored   authenticity_score IS NULL (run Resolve to score)
+  ⚠ Salesy / Low    authenticity_score < 60    (separate bucket, nothing lost)
+
+Stored: authenticity_score / authenticity_reason / authenticity_example (quoted post)
+Sort within A2: authenticity DESC, then overall.
+NOTE: we score genuine-EXPERIENCE quality directly rather than "is it AI-written?" —
+research shows off-the-shelf AI-text detection is unreliable and false-flags real people,
+so it is only a low-weight proxy.</pre>
+<div class="box-g">Worked example: @_akhaliq scored 15 -> Salesy (templated "X just released Y" announcements, not genuine personal reviews). A creator posting "Rebuilt our support line with @Tool — skeptical at first, but it holds a natural conversation. Still wish Hindi was better." scores high -> Genuine.</div>
+
 <hr>
 <h2>STEP 10 — FINAL SCORE &amp; TRACK ASSIGNMENT</h2>
 <pre style="font-size:13pt;text-align:center">
@@ -547,13 +571,15 @@ Weekly re-runs (DB already populated): <b>~100-300 new</b> (most handles fresh, 
 <p>Most accounts in the DB predate the paid-post detector and sit as <code>unknown</code>/<code>none</code>. The <b>Resolve Unbadged Accounts</b> button on the Track A page re-runs the detector over the entire backlog (relevant-first) and promotes the real promoters into A1/A2.</p>
 <pre>GET /api/resolve-unknowns          (SSE, JWT via _token)
 
-1. SELECT handle, bio FROM accounts
-   WHERE track='A' AND promotion_type IN ('unknown','none')
+1. SELECT handle, bio FROM accounts WHERE track='A' AND (
+     promotion_type IN ('unknown','none')                  &lt;- classify
+     OR (promotion_type IN ('inferred','explicit')
+         AND authenticity_score IS NULL) )                 &lt;- quality-score A2
    ORDER BY overall DESC            &lt;- most relevant first
-2. For each: fetch 20 posts -> analysePaidPattern -> UPDATE if resolved
-3. Same 3 RPM anti-bot pacing + 5,000/run cap. Abortable, progress saved.
+2. For each: fetch 20 posts -> analysePaidPattern -> resolve type + score authenticity
+3. Idempotent (scored accounts not re-picked) - 3 RPM - 5,000 cap - abortable.
 4. Streams a live tally:
-   { toA1, toA2, toNone, stillUnknown, processed, total }</pre>
+   { toA1, toA2, genuine, salesy, toNone, stillUnknown, processed, total }</pre>
 <div class="box-g">The live agent does this too: stale <code>unknown</code>/<code>none</code> duplicates are re-checked on every refresh, so the backlog shrinks automatically over time.</div>
 
 <hr>
@@ -577,11 +603,11 @@ Weekly re-runs (DB already populated): <b>~100-300 new</b> (most handles fresh, 
 <tr><td>GET</td><td>/api/health</td><td>Public</td><td>Key stats, DB status</td></tr>
 <tr><td>POST</td><td>/api/auth/login</td><td>Public</td><td>JWT token (7-day)</td></tr>
 <tr><td>GET</td><td>/api/run-demo</td><td>JWT</td><td>SSE stream — full agent run with paid-post analysis</td></tr>
-<tr><td>GET</td><td>/api/resolve-unknowns</td><td>JWT</td><td>SSE — re-classify unknown/none Track A into A1/A2</td></tr>
+<tr><td>GET</td><td>/api/resolve-unknowns</td><td>JWT</td><td>SSE — classify unknown/none + score A2 authenticity (genuine/salesy)</td></tr>
 <tr><td>GET</td><td>/api/accounts?limit=1000</td><td>JWT</td><td>All accounts (filterable)</td></tr>
 <tr><td>GET</td><td>/api/accounts/influencers</td><td>JWT</td><td>Track A — sorted A1→A2→Unknown by score</td></tr>
 <tr><td>GET</td><td>/api/accounts/pr-pages</td><td>JWT</td><td>Track B — ads audience</td></tr>
-<tr><td>GET</td><td>/api/accounts/promotion-stats</td><td>JWT</td><td>Track A counts: a1, a2, none, unknown, resolvable</td></tr>
+<tr><td>GET</td><td>/api/accounts/promotion-stats</td><td>JWT</td><td>Track A counts: a1, a2, a2_genuine, a2_salesy, a2_unscored, resolvable</td></tr>
 <tr><td>GET</td><td>/api/keywords</td><td>JWT</td><td>Own keywords</td></tr>
 <tr><td>GET</td><td>/api/keywords/friend</td><td>JWT</td><td>Friend DB keywords (read-only)</td></tr>
 <tr><td>POST/PATCH/DELETE</td><td>/api/keywords/:id</td><td>JWT</td><td>Manage own keywords</td></tr>

@@ -266,10 +266,11 @@ export default function WorkflowPage() {
        │  Phase 2: Fetch 20 posts /search?query=from:handle&count=20&type=Latest
        │           PAID-POST PATTERN DETECTOR (regex signals + Gemini, quoted evidence)
        │           ──► A1 (disclosure/code) · A2 (multi-brand pattern) · none · unknown
+       │           A2 also gets an AUTHENTICITY score 0-100 → Genuine (≥60) vs Salesy (<60)
        │           Stale unknown/none duplicates are re-checked on every refresh
        ▼
   SCORE MERGE ─── Overall = D2×25% + D3×25% + D4×20% + D5×30%
-       │           Track A sort: A1 (💰) → A2 (~) → Unknown  |  Track B: ads audience
+       │           Track A sort: A1 → A2-Genuine (✦) → A2-Unscored → A2-Salesy (⚠) → Track B
        ▼
   DB UPSERT ─── Turso  |  handle UNIQUE → INSERT or UPDATE
        │         promotion_type · promotion_confidence · promotion_signals saved
@@ -829,8 +830,57 @@ export default function WorkflowPage() {
 
           <InfoBox color={C.muted} style={{ fontSize:11 }}>
             <strong>DB sort order (Track A endpoint):</strong>{' '}
-            <Code>ORDER BY CASE promotion_type WHEN 'explicit' THEN 0 WHEN 'inferred' THEN 1 ELSE 2 END, overall DESC</Code><br />
-            A1 first → A2 → Unknown. UI shows only A1 and A2 chips (Unknown/none hidden).
+            <Code>ORDER BY CASE promotion_type WHEN 'explicit' THEN 0 WHEN 'inferred' THEN 1 ELSE 2 END, COALESCE(authenticity_score,-1) DESC, overall DESC</Code><br />
+            A1 first → A2 (genuine first by authenticity) → Unknown. UI shows A1 / A2-Genuine / Salesy / Unscored chips.
+          </InfoBox>
+        </Card>
+
+        <Arrow />
+
+        {/* A2 AUTHENTICITY — genuine vs salesy */}
+        <Card color={C.purple} title="A2 CONTENT AUTHENTICITY — Genuine Creators vs Salesy/Templated">
+          <InfoBox color={C.purple} style={{ marginBottom: 14 }}>
+            A2 is split by content quality so it stays a clean list of <strong>genuine creators</strong> whose
+            product posts an audience would trust — not hyped-up ads or AI/templated spam. Every A2 account gets an
+            <strong> authenticity score 0-100</strong> (Gemini reading 20 posts, blended 70% AI + 30% regex hint),
+            with the single most genuine post quoted as evidence.
+          </InfoBox>
+
+          <Row gap={12} style={{ marginBottom: 14 }}>
+            <InfoBox color={C.green} style={{ flex: 1 }}>
+              <div style={{ fontWeight:700, color:C.green, marginBottom:6 }}>✦ Genuine (score ≥ 60) — RAISES</div>
+              First-person lived experience ("I've been using…")<br />
+              Specific details (features, timeframes, real use-case)<br />
+              Honest/balanced (admits a downside)<br />
+              Natural conversational voice + real reasoning
+            </InfoBox>
+            <InfoBox color={C.muted} style={{ flex: 1 }}>
+              <div style={{ fontWeight:700, color:'#aaa', marginBottom:6 }}>⚠ Salesy (score &lt; 60) — LOWERS</div>
+              Hype overload (ALL CAPS, 🚀🔥, "BEST EVER")<br />
+              Generic / templated / interchangeable praise<br />
+              Pure CTA / link-dump<br />
+              Robotic, no personal voice (the low-weight "AI-ish" proxy)
+            </InfoBox>
+          </Row>
+
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:12 }}>
+            {[
+              { t:'✦ A2 — Genuine', d:'inferred + score ≥ 60 — the clean curated list', c:C.green },
+              { t:'◷ A2 — Unscored', d:'inferred + no score yet — run Resolve to score', c:C.gold },
+              { t:'⚠ Salesy / Low', d:'inferred + score < 60 — separate bucket, nothing lost', c:'#888' },
+            ].map(b => (
+              <div key={b.t} style={{ background:C.bg, border:`1px solid ${b.c}44`, borderTop:`3px solid ${b.c}`, borderRadius:6, padding:'10px 12px' }}>
+                <div style={{ color:b.c, fontWeight:700, fontSize:12, marginBottom:4 }}>{b.t}</div>
+                <div style={{ color:C.muted, fontSize:11, lineHeight:1.5 }}>{b.d}</div>
+              </div>
+            ))}
+          </div>
+
+          <InfoBox color={C.muted} style={{ fontSize:11 }}>
+            Threshold <Code>GENUINE_THRESHOLD = 60</Code> (backend + frontend). Stored as
+            <Code>authenticity_score</Code> · <Code>authenticity_reason</Code> · <Code>authenticity_example</Code>.
+            Sort within A2 = authenticity DESC, then overall. Per research, "AI-written" detection is deliberately
+            a low-weight proxy — we score genuine-experience quality directly, which is more reliable.
           </InfoBox>
         </Card>
 
@@ -847,16 +897,16 @@ export default function WorkflowPage() {
             <InfoBox color={C.blue} style={{ flex: 1 }}>
               <div style={{ fontWeight:700, color:C.blue, marginBottom:6 }}>How it runs</div>
               Endpoint: <Code>GET /api/resolve-unknowns</Code> (SSE)<br />
-              Selects <Code>track='A' AND promotion_type IN ('unknown','none')</Code>, ORDER BY overall DESC<br />
-              For each: fetch 20 posts → paid-post detector → UPDATE if resolved<br />
-              Same 3 RPM anti-bot pacing + 5,000/run cap. Abortable, progress saved.
+              Selects unknown/none to classify <strong>AND</strong> A2/A1 not yet authenticity-scored<br />
+              For each: fetch 20 posts → detector → resolve type <strong>+ score authenticity</strong><br />
+              Idempotent (scored accounts aren't re-picked) · 3 RPM · 5,000 cap · abortable.
             </InfoBox>
             <InfoBox color={C.green} style={{ flex: 1 }}>
               <div style={{ fontWeight:700, color:C.green, marginBottom:6 }}>Live tally (SSE)</div>
               <Code>start</Code> → total count<br />
-              <Code>status</Code> → current account + progress %<br />
-              <Code>account</Code> → running <Code>{'{ toA1, toA2, toNone, stillUnknown, processed }'}</Code><br />
-              <Code>complete</Code> → final summary, list reloads automatically
+              <Code>account</Code> → <Code>{'{ toA1, toA2, genuine, salesy, toNone, stillUnknown }'}</Code><br />
+              <Code>complete</Code> → final summary, list reloads automatically<br />
+              UI shows ✦ Genuine / ⚠ Salesy filling up live
             </InfoBox>
           </Row>
           <InfoBox color={C.gold} style={{ fontSize: 11 }}>
@@ -926,6 +976,11 @@ export default function WorkflowPage() {
                 ['linktree', 'TEXT', ''],
                 ['ai_model', 'TEXT', 'migration col'],
                 ['ai_reason', 'TEXT', 'migration col'],
+                ['promotion_type', 'TEXT', 'explicit/inferred/none'],
+                ['promotion_signals', 'TEXT', 'JSON evidence'],
+                ['authenticity_score', 'INTEGER', '0-100 A2 quality'],
+                ['authenticity_reason', 'TEXT', 'why'],
+                ['authenticity_example', 'TEXT', 'genuine post'],
                 ['run_id', 'INTEGER FK', '→ runs.id'],
                 ['first_seen', 'TEXT', ''],
                 ['last_updated', 'TEXT', ''],
@@ -1034,7 +1089,7 @@ export default function WorkflowPage() {
           <RouteRow method="GET" path="/api/accounts/pr-pages" auth={true}
             returns="{ accounts[] } — track='B', overall DESC, LIMIT 1000" />
           <RouteRow method="GET" path="/api/accounts/promotion-stats" auth={true}
-            returns="{ a1, a2, none, unknown, resolvable } — Track A counts by promotion_type" />
+            returns="{ a1, a2, none, unknown, a2_genuine, a2_salesy, a2_unscored, resolvable, threshold }" />
           <RouteRow method="DELETE" path="/api/accounts/cleanup" auth={true}
             returns="Deletes overall<20 AND d3<15 → { deleted, remaining }" />
           <RouteRow method="GET" path="/api/accounts/:handle" auth={true}
@@ -1047,7 +1102,7 @@ export default function WorkflowPage() {
           <RouteRow method="GET" path="/api/dashboard/last-run" auth={true}
             returns="{ lastRun: { totalFetched, newAccounts, updatedAccounts, a1, a2, trackB, other } } — from run_id" />
           <RouteRow method="GET" path="/api/resolve-unknowns" auth={true}
-            returns="text/event-stream — re-runs paid-post detector over unknown/none Track A. Live A1/A2 tally." />
+            returns="text/event-stream — classifies unknown/none + scores A2 authenticity. Live A1/A2/genuine/salesy tally." />
 
           {/* Keywords */}
           <div style={{ fontSize: 12, fontWeight: 700, color: C.green, margin: '16px 0 8px', letterSpacing: 0.5 }}>KEYWORDS</div>

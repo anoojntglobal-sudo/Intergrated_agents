@@ -189,17 +189,42 @@ Quality backstops:
 - Output feeds the Gemini prompt as "Auto-detected signals" for calibration`,
       },
       {
-        title: 'Resolve Unknowns Backfill',
-        context: 'One-pass job to re-classify the entire unknown/none backlog',
-        prompt: `Most accounts predate the detector and sit as unknown/none.
+        title: 'A2 Authenticity Scoring (Genuine vs Salesy)',
+        context: 'Split A2 by content quality — keep only genuine creators an audience trusts (option B)',
+        prompt: `Among A2 (likely-paid) accounts, rank how GENUINE the product content reads.
+We want creators who post "I tried this, here's my honest take" — not hyped ads or
+AI/templated spam. Gemini scores 0-100 (blended 70% AI + 30% regex hint), reading 20 posts.
+
+RAISES score (Genuine, >= 60):
+  - first-person lived experience ("I've been using…", "switched to…")
+  - specific details (features, timeframes, real use-case)
+  - honest/balanced (admits a downside, "skeptical at first")
+  - natural conversational voice + real reasoning
+LOWERS score (Salesy, < 60):
+  - hype overload (ALL CAPS, 🚀🔥, "BEST EVER")
+  - generic / templated / interchangeable praise
+  - pure CTA / link-dump
+  - robotic, no personal voice  (low-weight "AI-ish" proxy)
+
+Buckets (threshold 60): ✦ Genuine (>=60) · ◷ Unscored (null) · ⚠ Salesy (<60).
+Stored: authenticity_score / authenticity_reason / authenticity_example (quoted post).
+NOTE: we score genuine-quality DIRECTLY rather than "is it AI?" — research shows
+AI-text detection is unreliable and false-flags real people.`,
+      },
+      {
+        title: 'Resolve Unknowns + Quality Backfill',
+        context: 'One-pass job: classify the unknown/none backlog AND score A2 authenticity',
+        prompt: `Most accounts predate the detector and sit as unknown/none/unscored.
 GET /api/resolve-unknowns (SSE) re-runs the detector over the backlog:
 
-1. SELECT handle,bio FROM accounts
-   WHERE track='A' AND promotion_type IN ('unknown','none')
+1. SELECT handle,bio FROM accounts WHERE track='A' AND (
+     promotion_type IN ('unknown','none')                       ← classify
+     OR (promotion_type IN ('inferred','explicit')
+         AND authenticity_score IS NULL) )                      ← quality-score A2
    ORDER BY overall DESC          ← relevant accounts first
-2. For each: fetch 20 posts → analysePaidPattern → UPDATE if resolved
-3. Same 3 RPM anti-bot pacing + 5,000/run cap. Abortable, progress saved.
-4. Stream live tally: { toA1, toA2, toNone, stillUnknown, processed, total }
+2. For each: fetch 20 posts → analysePaidPattern → resolve type + score authenticity
+3. Idempotent (scored accounts not re-picked) · 3 RPM · 5,000 cap · abortable.
+4. Stream live tally: { toA1, toA2, genuine, salesy, toNone, stillUnknown, processed, total }
 
 Live agent does this too: stale unknown/none duplicates are re-checked on
 every refresh, so the backlog shrinks automatically over time.`,
