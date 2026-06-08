@@ -78,7 +78,7 @@ const MAX_REQUESTS_PER_RUN = Number(process.env.MAX_REQUESTS_PER_RUN) || 5000;
 // Hard monthly-quota guard. RapidAPI reports the real shared monthly counter in
 // response headers; we stop a run when remaining drops to this reserve so we never
 // exhaust the plan (and leave headroom for the shared user). Configurable via env.
-const QUOTA_MIN_REMAINING = Number(process.env.QUOTA_MIN_REMAINING) || 10000;
+const QUOTA_MIN_REMAINING = Number(process.env.QUOTA_MIN_REMAINING) || 3000;
 let rapidQuotaRemaining = null; // latest x-ratelimit-requests-remaining seen
 let rapidQuotaLimit     = null; // latest x-ratelimit-requests-limit seen
 
