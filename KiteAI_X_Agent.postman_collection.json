@@ -1,0 +1,199 @@
+{
+  "info": {
+    "name": "KiteAI X Agent",
+    "description": "Inspect every request/response: your backend API, the twitter241 data API, and OpenRouter (Gemini). Fill the collection variables first (baseUrl, rapidApiKey, openRouterKey). Run 'App · Login' once — it auto-saves the JWT into {{token}} for all other app requests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3001", "type": "string" },
+    { "key": "token", "value": "", "type": "string" },
+    { "key": "adminEmail", "value": "admin@kiteai.com", "type": "string" },
+    { "key": "adminPassword", "value": "KiteAI@2026!", "type": "string" },
+    { "key": "rapidApiHost", "value": "twitter241.p.rapidapi.com", "type": "string" },
+    { "key": "rapidApiKey", "value": "PASTE_RAPIDAPI_KEY_PAID_FROM_BACKEND_ENV", "type": "string" },
+    { "key": "openRouterKey", "value": "PASTE_OPENROUTER_API_KEY_FROM_BACKEND_ENV", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "App · Login (saves {{token}})",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "var d = pm.response.json();",
+              "if (d.token) { pm.collectionVariables.set('token', d.token); console.log('token saved'); }",
+              "pm.test('login ok', function () { pm.expect(d.token).to.be.a('string'); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{baseUrl}}/api/auth/login", "host": ["{{baseUrl}}"], "path": ["api", "auth", "login"] },
+        "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}" }
+      }
+    },
+    {
+      "name": "App · Health (public)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/api/health", "host": ["{{baseUrl}}"], "path": ["api", "health"] }
+      }
+    },
+    {
+      "name": "App · Accounts list",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": {
+          "raw": "{{baseUrl}}/api/accounts?limit=50&offset=0",
+          "host": ["{{baseUrl}}"], "path": ["api", "accounts"],
+          "query": [{ "key": "limit", "value": "50" }, { "key": "offset", "value": "0" }]
+        }
+      }
+    },
+    {
+      "name": "App · Track A (influencers)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": { "raw": "{{baseUrl}}/api/accounts/influencers", "host": ["{{baseUrl}}"], "path": ["api", "accounts", "influencers"] }
+      }
+    },
+    {
+      "name": "App · Promotion stats (A1/A2/genuine/salesy)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": { "raw": "{{baseUrl}}/api/accounts/promotion-stats", "host": ["{{baseUrl}}"], "path": ["api", "accounts", "promotion-stats"] }
+      }
+    },
+    {
+      "name": "App · Dashboard last-run",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": { "raw": "{{baseUrl}}/api/dashboard/last-run", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "last-run"] }
+      }
+    },
+    {
+      "name": "App · Test OpenRouter (AI live check)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": { "raw": "{{baseUrl}}/api/settings/test-openrouter", "host": ["{{baseUrl}}"], "path": ["api", "settings", "test-openrouter"] }
+      }
+    },
+    {
+      "name": "App · Run Agent (SSE stream)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/run-demo?_token={{token}}",
+          "host": ["{{baseUrl}}"], "path": ["api", "run-demo"],
+          "query": [{ "key": "_token", "value": "{{token}}" }]
+        },
+        "description": "Server-Sent Events stream. Postman shows events as they arrive (status, search_done, account, api_call, complete). It does not auto-close — hit Cancel when done."
+      }
+    },
+    {
+      "name": "App · Resolve Unknowns (SSE stream)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/resolve-unknowns?scope=all&_token={{token}}",
+          "host": ["{{baseUrl}}"], "path": ["api", "resolve-unknowns"],
+          "query": [{ "key": "scope", "value": "all" }, { "key": "_token", "value": "{{token}}" }]
+        },
+        "description": "SSE stream: classifies unknown/none + scores A2 authenticity. Watch start/status/account/api_call/complete."
+      }
+    },
+    {
+      "name": "twitter241 · Search (compound OR query)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "X-RapidAPI-Key", "value": "{{rapidApiKey}}" },
+          { "key": "X-RapidAPI-Host", "value": "{{rapidApiHost}}" }
+        ],
+        "url": {
+          "raw": "https://twitter241.p.rapidapi.com/search?query=\"vapi\" OR \"elevenlabs\" OR \"deepgram\"&count=20&type=Top",
+          "protocol": "https",
+          "host": ["twitter241", "p", "rapidapi", "com"],
+          "path": ["search"],
+          "query": [
+            { "key": "query", "value": "\"vapi\" OR \"elevenlabs\" OR \"deepgram\"" },
+            { "key": "count", "value": "20" },
+            { "key": "type", "value": "Top" }
+          ]
+        },
+        "description": "Exactly what the agent fires per compound query. Handles are at result.timeline.instructions[].entries[].content.itemContent.tweet_results.result.core.user_results.result.core.screen_name. WARNING: counts against your shared paid RapidAPI quota."
+      }
+    },
+    {
+      "name": "twitter241 · User profile",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "X-RapidAPI-Key", "value": "{{rapidApiKey}}" },
+          { "key": "X-RapidAPI-Host", "value": "{{rapidApiHost}}" }
+        ],
+        "url": {
+          "raw": "https://twitter241.p.rapidapi.com/user?username=vapidev",
+          "protocol": "https",
+          "host": ["twitter241", "p", "rapidapi", "com"],
+          "path": ["user"],
+          "query": [{ "key": "username", "value": "vapidev" }]
+        },
+        "description": "Profile fetch. Fields at result.data.user.result.core (name, screen_name) + .legacy (description, followers_count, friends_count, statuses_count) + .is_blue_verified."
+      }
+    },
+    {
+      "name": "twitter241 · Recent tweets (from:handle)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "X-RapidAPI-Key", "value": "{{rapidApiKey}}" },
+          { "key": "X-RapidAPI-Host", "value": "{{rapidApiHost}}" }
+        ],
+        "url": {
+          "raw": "https://twitter241.p.rapidapi.com/search?query=from:hasantoxr&count=20&type=Latest",
+          "protocol": "https",
+          "host": ["twitter241", "p", "rapidapi", "com"],
+          "path": ["search"],
+          "query": [
+            { "key": "query", "value": "from:hasantoxr" },
+            { "key": "count", "value": "20" },
+            { "key": "type", "value": "Latest" }
+          ]
+        },
+        "description": "The posts the paid-pattern + authenticity detector reads."
+      }
+    },
+    {
+      "name": "OpenRouter · Gemini 2.5 Flash (raw)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{openRouterKey}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": { "raw": "https://openrouter.ai/api/v1/chat/completions", "protocol": "https", "host": ["openrouter", "ai"], "path": ["api", "v1", "chat", "completions"] },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"model\": \"google/gemini-2.5-flash\",\n  \"max_tokens\": 100,\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Reply with exactly: KiteAI test OK\" }\n  ]\n}"
+        },
+        "description": "Direct call to the scoring model. Answer is at choices[0].message.content."
+      }
+    }
+  ]
+}

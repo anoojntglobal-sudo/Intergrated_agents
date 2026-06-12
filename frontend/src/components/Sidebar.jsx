@@ -5,6 +5,7 @@ import { useAgent } from '../context/AgentContext';
 const NAV = [
   { to: '/',            icon: '▦',  label: 'Dashboard'   },
   { to: '/agent',       icon: '⚡', label: 'Run Agent'   },
+  { to: '/tasks',       icon: '🎯', label: 'Tasks'       },
   { to: '/accounts',    icon: '◉',  label: 'All Accounts' },
   { to: '/influencers', icon: '★',  label: 'Track A'      },
   { to: '/pr-pages',    icon: '📢', label: 'Track B'      },
@@ -14,10 +15,23 @@ const NAV = [
   { to: '/prompts',     icon: '✦',  label: 'Prompts'     },
 ];
 
+const PHASE_LABEL = {
+  search:   'Searching keywords',
+  profiles: 'Fetching profiles',
+  friends:  'Friend-list pass',
+  done:     'Finishing up',
+};
+
 export default function Sidebar() {
   const { user, logout }   = useAuth();
-  const { running, stats } = useAgent();
+  const { running, serverActive, runProgress, stats } = useAgent();
   const navigate = useNavigate();
+
+  const active = running || serverActive;           // show for runs started anywhere
+  const pct    = runProgress?.overallPct ?? 0;
+  const qDone  = runProgress?.queriesDone ?? 0;
+  const qTotal = runProgress?.totalQueries ?? 0;
+  const phase  = PHASE_LABEL[runProgress?.phase] ?? 'Running';
 
   function handleLogout() { logout(); navigate('/login'); }
 
@@ -40,8 +54,8 @@ export default function Sidebar() {
             >
               <span className="nav-icon">{icon}</span>
               <span className="nav-label">{label}</span>
-              {isAgentLink && running && (
-                <span className="nav-running-badge" title={`Running — ${stats.added} new`}>
+              {isAgentLink && active && (
+                <span className="nav-running-badge" title={`Running — ${pct}% · query ${qDone}/${qTotal}`}>
                   <span className="nav-pulse" />
                 </span>
               )}
@@ -50,12 +64,20 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* Live run status strip */}
-      {running && (
-        <div className="sidebar-run-strip">
-          <span className="live-dot" />
-          <span>Agent running</span>
-          <span className="strip-stat">+{stats.added}</span>
+      {/* Live run status strip — overall progress, visible on every page */}
+      {active && (
+        <div className="sidebar-run-strip" onClick={() => navigate('/agent')} title="Open Run Agent">
+          <div className="strip-top">
+            <span className="live-dot" />
+            <span>Agent running</span>
+            <span className="strip-pct">{pct}%</span>
+          </div>
+          <div className="strip-progress">
+            <div className="strip-progress-fill" style={{ width: `${pct}%` }} />
+          </div>
+          <div className="strip-sub">
+            {phase}{qTotal > 0 ? ` · query ${qDone}/${qTotal}` : ''} · +{stats.added} new
+          </div>
         </div>
       )}
 

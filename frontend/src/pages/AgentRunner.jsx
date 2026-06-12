@@ -62,7 +62,11 @@ const PRESETS = [
 ];
 
 export default function AgentRunner() {
-  const { running, accounts, stepLog, progress, summary, connErr, stats, apiLog, startRun, stopRun } = useAgent();
+  const { running, accounts, stepLog, progress, summary, connErr, stats, apiLog, runProgress, startRun, stopRun } = useAgent();
+  const PHASE_LABEL = {
+    search: 'Searching keywords', profiles: 'Fetching profiles',
+    friends: 'Friend-list pass',  done: 'Finishing up',
+  };
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const logRef = useRef(null);
@@ -121,10 +125,25 @@ export default function AgentRunner() {
       </div>
 
       {(running || progress > 0) && (
-        <div className="progress-bar-wrap">
-          <div className="progress-bar" style={{ width: `${progress}%` }} />
-          <span className="progress-pct">{progress}%</span>
-        </div>
+        <>
+          {runProgress && (running || (runProgress.overallPct ?? 0) > 0) && (
+            <div className="run-phase-line">
+              <span className="run-phase-name">
+                {PHASE_LABEL[runProgress.phase] ?? 'Running'}
+              </span>
+              {runProgress.totalQueries > 0 && (
+                <span className="run-phase-q">query {runProgress.queriesDone}/{runProgress.totalQueries}</span>
+              )}
+              {runProgress.currentQuery && (
+                <span className="run-phase-cur" title={runProgress.currentQuery}>{runProgress.currentQuery}</span>
+              )}
+            </div>
+          )}
+          <div className="progress-bar-wrap">
+            <div className="progress-bar" style={{ width: `${progress}%` }} />
+            <span className="progress-pct">{progress}%</span>
+          </div>
+        </>
       )}
 
       {summary && !running && (

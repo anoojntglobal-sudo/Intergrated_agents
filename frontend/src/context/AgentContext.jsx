@@ -13,11 +13,17 @@ export function AgentProvider({ children }) {
   const [connErr,  setConnErr]  = useState('');
   const [stats,    setStats]    = useState({ added: 0, updated: 0, errors: 0 });
   const [apiLog,   setApiLog]   = useState([]); // raw request/response strings
+  const [serverActive, setServerActive] = useState(false); // run active server-side (from status poll)
+  const [runProgress,  setRunProgress]  = useState(null);  // { overallPct, phase, currentQuery, queriesDone, totalQueries }
 
   const esRef          = useRef(null);
   const completedRef   = useRef(false);
   const reconnectRef   = useRef(null);  // timer for auto-reattach after a dropped stream
   const doneCallbacks  = useRef([]);  // components register here to hear run completion
+  const runningRef     = useRef(false); // mirrors `running` for use inside poll/interval closures
+  const pollRef        = useRef(null);  // status-poll interval
+
+  useEffect(() => { runningRef.current = running; }, [running]);
 
   const addLog = useCallback((msg, type = 'info') => {
     setStepLog(prev => [...prev.slice(-299), { msg, type, ts: Date.now() }]);
@@ -29,21 +35,52 @@ export function AgentProvider({ children }) {
     if (reconnectRef.current) clearTimeout(reconnectRef.current);
   }, []);
 
-  // On load, reattach if a run is already going in the background (survives reload)
+  // Poll run status every 15s (local read — NO RapidAPI quota cost). Keeps the
+  // global "Agent running" badge live on every page, detects runs started by the
+  // weekly cron / terminal / another tab, and auto-attaches the live log stream.
   useEffect(() => {
     const token = localStorage.getItem('kiteai_token');
     if (!token) return;
-    fetch(`${API}/api/agent/status`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json())
-      .then(d => {
+    let stopped = false;
+
+    const pollStatus = async () => {
+      if (document.hidden) return; // skip when tab not visible — gentle on the server
+      try {
+        const r = await fetch(`${API}/api/agent/status`, { headers: { Authorization: `Bearer ${token}` } });
+        const d = await r.json();
+        if (stopped) return;
+        setServerActive(!!d?.running);
         if (d?.running) {
-          completedRef.current = false;
-          setRunning(true);
-          addLog('Reattached to a run already in progress…', 'info');
-          attachStream();
+          setRunProgress({
+            overallPct:   d.progress      ?? 0,
+            phase:        d.phase          ?? null,
+            currentQuery: d.currentQuery   ?? null,
+            queriesDone:  d.queriesDone     ?? 0,
+            totalQueries: d.totalQueries    ?? 0,
+            taskId:       d.taskId          ?? null,
+          });
+          // A run is live server-side but we're not watching it → attach the stream.
+          if (!runningRef.current && !esRef.current) {
+            completedRef.current = false;
+            setRunning(true);
+            addLog('Detected an active run — attaching to the live log…', 'info');
+            attachStream();
+          }
+        } else {
+          setRunProgress(null);
         }
-      })
-      .catch(() => {});
+      } catch {}
+    };
+
+    pollStatus();                                  // immediate on load
+    pollRef.current = setInterval(pollStatus, 15000);
+    const onVis = () => { if (!document.hidden) pollStatus(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      stopped = true;
+      if (pollRef.current) clearInterval(pollRef.current);
+      document.removeEventListener('visibilitychange', onVis);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -94,6 +131,21 @@ export function AgentProvider({ children }) {
           : 'info';
         addLog(d.message, type);
         if (d.progress !== undefined) setProgress(d.progress);
+      } catch {}
+    });
+
+    es.addEventListener('run_progress', e => {
+      try {
+        const d = JSON.parse(e.data);
+        setRunProgress(prev => ({
+          ...(prev || {}),                 // preserve taskId learned from the status poll
+          overallPct:   d.overallPct   ?? 0,
+          phase:        d.phase         ?? null,
+          currentQuery: d.currentQuery  ?? null,
+          queriesDone:  d.queriesDone    ?? 0,
+          totalQueries: d.totalQueries   ?? 0,
+        }));
+        if (typeof d.overallPct === 'number') setProgress(d.overallPct);
       } catch {}
     });
 
@@ -214,6 +266,8 @@ export function AgentProvider({ children }) {
     setRunning(true);
     setAccounts([]); setErrCards([]); setStepLog([]); setProgress(0);
     setSummary(null); setConnErr(''); setStats({ added: 0, updated: 0, errors: 0 }); setApiLog([]);
+    setRunProgress({ overallPct: 0, phase: 'search', currentQuery: null, queriesDone: 0, totalQueries: 0 });
+    setServerActive(true);
     completedRef.current = false;
 
     const token = localStorage.getItem('kiteai_token');
@@ -226,6 +280,32 @@ export function AgentProvider({ children }) {
       const d  = await r.json().catch(() => ({}));
       if (d.alreadyRunning) addLog('A run was already in progress — attaching to it.', 'warn');
       else addLog(`Agent started${d.totalQueries ? ` — ${d.totalQueries} queries` : ''}. Runs in the background — safe to close this tab.`, 'success');
+    } catch {
+      setConnErr(`Cannot reach backend at ${API} — is the server running?`);
+      setRunning(false);
+      return;
+    }
+    attachStream();
+  }
+
+  // Run a Task — scoped to the task's keywords; backend links found accounts to it.
+  async function startTaskRun(taskId) {
+    if (running || !taskId) return;
+    setRunning(true);
+    setAccounts([]); setErrCards([]); setStepLog([]); setProgress(0);
+    setSummary(null); setConnErr(''); setStats({ added: 0, updated: 0, errors: 0 }); setApiLog([]);
+    setRunProgress({ overallPct: 0, phase: 'search', currentQuery: null, queriesDone: 0, totalQueries: 0 });
+    setServerActive(true);
+    completedRef.current = false;
+
+    const token = localStorage.getItem('kiteai_token');
+    if (!token) { setConnErr('Not authenticated — please log in again.'); setRunning(false); return; }
+
+    try {
+      const r = await fetch(`${API}/api/tasks/${taskId}/run`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const d = await r.json().catch(() => ({}));
+      if (d.alreadyRunning) addLog('A run was already in progress — attaching to it.', 'warn');
+      else addLog(`Task started${d.totalKeywords ? ` — ${d.totalKeywords} keywords` : ''}. Runs in the background.`, 'success');
     } catch {
       setConnErr(`Cannot reach backend at ${API} — is the server running?`);
       setRunning(false);
@@ -247,7 +327,8 @@ export function AgentProvider({ children }) {
   return (
     <AgentContext.Provider value={{
       running, accounts, errCards, stepLog, progress, summary, connErr, stats, apiLog,
-      startRun, stopRun, onRunComplete,
+      serverActive, runProgress,
+      startRun, startTaskRun, stopRun, onRunComplete,
     }}>
       {children}
     </AgentContext.Provider>

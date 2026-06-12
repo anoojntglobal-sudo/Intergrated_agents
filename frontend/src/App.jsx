@@ -11,6 +11,8 @@ import KeywordsPage   from './pages/KeywordsPage';
 import SettingsPage   from './pages/SettingsPage';
 import WorkflowPage   from './pages/WorkflowPage';
 import PromptsPage    from './pages/PromptsPage';
+import TasksPage      from './pages/TasksPage';
+import TaskDetailPage from './pages/TaskDetailPage';
 
 function AppLayout() {
   return (
@@ -22,6 +24,8 @@ function AppLayout() {
           <Routes>
             <Route path="/"            element={<Dashboard />} />
             <Route path="/agent"       element={<AgentRunner />} />
+            <Route path="/tasks"       element={<TasksPage />} />
+            <Route path="/tasks/:id"   element={<TaskDetailPage />} />
             <Route path="/accounts"    element={<AccountsPage mode="all" />} />
             <Route path="/influencers" element={<AccountsPage mode="influencers" />} />
             <Route path="/pr-pages"    element={<AccountsPage mode="pr-pages" />} />

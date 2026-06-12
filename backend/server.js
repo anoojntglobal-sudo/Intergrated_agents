@@ -53,6 +53,7 @@ app.use('/api/keywords',  require('./routes/keywords'));
 app.use('/api/accounts',  require('./routes/accounts'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/settings',  require('./routes/settings'));
+app.use('/api/tasks',     require('./routes/tasks'));
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // PROACTIVE RATE LIMITER â€” prevents blocks before they happen
@@ -74,6 +75,11 @@ const JITTER_MS = 6000; // Â±3 000ms random spread
 
 // Per-run request cap â€” protects shared paid quota
 const MAX_REQUESTS_PER_RUN = Number(process.env.MAX_REQUESTS_PER_RUN) || 5000;
+
+// How many pages to pull per compound search query (page 1 + extra cursor pages).
+// Each page = 1 API call. "Top" search depth has diminishing returns after a few
+// pages (results start repeating), so 3 is a sensible default. Tunable via env.
+const MAX_SEARCH_PAGES = Math.max(1, Number(process.env.MAX_SEARCH_PAGES) || 3);
 
 // Hard monthly-quota guard. RapidAPI reports the real shared monthly counter in
 // response headers; we stop a run when remaining drops to this reserve so we never
@@ -192,12 +198,24 @@ const runManager = {
   startedAt: 0,
   triggeredBy: null,
   stopRequested: false,
-  progress: 0,
+  progress: 0,            // OVERALL % across the whole run (driven by run_progress)
+  phase: 'idle',          // search | profiles | friends | done
+  taskId: null,           // when set, the run is scoped to a Task and links accounts to it
+  currentQuery: null,     // the compound query being searched right now
+  queriesDone: 0,         // how many compound queries finished
+  totalQueries: 0,        // total compound queries this run
   listeners: new Set(),   // open SSE res objects
   history: [],            // recent events so late-joiners catch up
   lastSummary: null,
   broadcast(event, data) {
-    if (event === 'status' && typeof data?.progress === 'number') this.progress = data.progress;
+    // OVERALL progress is driven ONLY by run_progress (status.progress is per-phase, not overall)
+    if (event === 'run_progress' && data) {
+      if (typeof data.overallPct   === 'number') this.progress      = data.overallPct;
+      if (typeof data.queriesDone  === 'number') this.queriesDone   = data.queriesDone;
+      if (typeof data.totalQueries === 'number') this.totalQueries  = data.totalQueries;
+      if (data.phase)            this.phase        = data.phase;
+      if ('currentQuery' in data) this.currentQuery = data.currentQuery;
+    }
     this.history.push({ event, data });
     if (this.history.length > 400) this.history.shift();
     for (const res of this.listeners) {
@@ -217,18 +235,23 @@ const runManager = {
 
 // Start an agent run in the BACKGROUND (not tied to any request). Returns false
 // if a run is already active. Events stream to whoever is attached as a listener.
-function startAgentRun({ queries, directHandles = [], triggeredBy = 'manual' }) {
+function startAgentRun({ queries, directHandles = [], triggeredBy = 'manual', taskId = null }) {
   if (runManager.active) return false;
   runManager.active = true;
   runManager.stopRequested = false;
   runManager.startedAt = Date.now();
   runManager.triggeredBy = triggeredBy;
+  runManager.taskId = taskId;
   runManager.progress = 0;
+  runManager.phase = 'search';
+  runManager.currentQuery = null;
+  runManager.queriesDone = 0;
+  runManager.totalQueries = 0;
   runManager.history = [];
   runManager.lastSummary = null;
 
   runAgent({
-    queries, directHandles, triggeredBy,
+    queries, directHandles, triggeredBy, taskId,
     emit:      (e, d) => runManager.broadcast(e, d),
     keepAlive: ()     => runManager.ping(),
     isAborted: ()     => runManager.stopRequested,
@@ -238,6 +261,7 @@ function startAgentRun({ queries, directHandles = [], triggeredBy = 'manual' }) 
     .finally(() => {
       runManager.active = false;
       apiCallSink = null;
+      if (taskId) db.execute({ sql: `UPDATE tasks SET status='done', last_run_at=datetime('now') WHERE id=?`, args: [taskId] }).catch(() => {});
       runManager.endListeners(); // close viewer connections; data is saved in DB
     });
   return true;
@@ -345,6 +369,19 @@ function captureQuota(headers) {
   const lim = Number(headers['x-ratelimit-requests-limit']);
   if (Number.isFinite(rem)) rapidQuotaRemaining = rem;
   if (Number.isFinite(lim)) rapidQuotaLimit = lim;
+  // Persist so the dashboard can show real quota even on a fresh process (before any new call)
+  if (Number.isFinite(rem)) persistQuota(rem, Number.isFinite(lim) ? lim : rapidQuotaLimit).catch(() => {});
+}
+
+// Save last-known shared monthly quota to agent_config (survives process restarts)
+async function persistQuota(rem, lim) {
+  const put = (key, val) => db.execute({
+    sql: `INSERT INTO agent_config (key, value, updated_at) VALUES (?, ?, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`,
+    args: [key, String(val)],
+  });
+  await put('rapid_quota_remaining', rem);
+  if (Number.isFinite(lim)) await put('rapid_quota_limit', lim);
 }
 
 // True when we're at/below the reserve and must stop to protect the shared plan
@@ -620,7 +657,18 @@ async function upsertAccount(account, runId) {
 // emit/keepAlive are injected by the caller (runManager broadcasts to all attached
 // viewers). The run is NO LONGER tied to a single socket — it only stops when an
 // explicit stop is requested (isAborted), so it survives client disconnects.
-async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', emit = () => {}, keepAlive = () => {}, isAborted = () => false }) {
+async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', taskId = null, emit = () => {}, keepAlive = () => {}, isAborted = () => false }) {
+  // When the run is scoped to a Task, link every account we save to that task
+  // (shared global pool — the link lets us view each task's results separately).
+  const linkTask = async (handle) => {
+    if (!taskId || !handle) return;
+    try {
+      await db.execute({
+        sql:  `INSERT OR IGNORE INTO task_accounts (task_id, handle) VALUES (?, ?)`,
+        args: [taskId, handle.toLowerCase()],
+      });
+    } catch {}
+  };
   const isLocalAborted = () => isAborted();
   const pace = (msg) => emit('status', { step: 'pacing', message: msg });
   const paceWithBreak = async (msg) => { pace(msg); await humanBreak(pace); };
@@ -649,7 +697,7 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', e
     const groups = [];
     for (let i = 0; i < rawQueries.length; i += GROUP) {
       const chunk = rawQueries.slice(i, i + GROUP);
-      const wrapped = chunk.map(q => q.includes(' ') ? `”${q}”` : q);
+      const wrapped = chunk.map(q => q.includes(' ') ? `"${q}"` : q);
       groups.push(wrapped.join(' OR '));
     }
     return groups;
@@ -659,7 +707,7 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', e
   // Week 1: indices 0,4,8...  Week 2: indices 1,5,9...  etc.
   // Spreads discovery evenly and quadruples profile-fetch budget per run
   function applyWeeklyRotation(compoundQueries) {
-    if (triggeredBy === 'manual') return compoundQueries; // manual = full run
+    if (triggeredBy === 'manual' || taskId) return compoundQueries; // manual + task = full run
     const weekSlot = Math.floor((new Date().getDate() - 1) / 7) % 4;
     return compoundQueries.filter((_, i) => i % 4 === weekSlot);
   }
@@ -682,14 +730,22 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', e
     key_stats:  keyStats(),
   });
 
+  // OVERALL progress helper: maps (queryIndex + intra-query fraction) → 0-95%.
+  // Reserves 95-100% for the post-loop friend-list / direct-handle phase.
+  const overallPct = (qIdx, intra = 0) =>
+    Math.min(95, Math.round(((qIdx + Math.min(Math.max(intra, 0), 1)) / Math.max(totalCompound, 1)) * 95));
+
   try { // catches QuotaExhaustedError from acquireKey
-  for (const query of shuffledQueries) {
+  for (let qIdx = 0; qIdx < shuffledQueries.length; qIdx++) {
+    const query = shuffledQueries[qIdx];
     if (isLocalAborted()) break;
     if (health.calls >= MAX_REQUESTS_PER_RUN || quotaExhaustedGuard()) {
       emit('status', { step: 'cap_reached', message: `Stopping before next query — ${quotaExhaustedGuard() ? `monthly quota reserve reached (${rapidQuotaRemaining} left)` : `per-run cap (${MAX_REQUESTS_PER_RUN})`}. Data saved.`, progress: 100 });
       break;
     }
-    emit('status', { step: 'search', message: `Searching: “${query}”`, progress: 0 });
+    emit('run_progress', { phase: 'search', currentQuery: query,
+      queriesDone: qIdx, totalQueries: totalCompound, overallPct: overallPct(qIdx) });
+    emit('status', { step: 'search', message: `Searching: "${query}" [${qIdx + 1}/${totalCompound}]`, progress: 0 });
 
     const searchCount = 40 + Math.floor(Math.random() * 11); // anti-bot count variation
     const searchRes = await callAPI('search', { query, count: searchCount, type: 'Top' }, paceWithBreak, keepAlive);
@@ -710,17 +766,36 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', e
     // Extract handles from page 1
     let rawHandles = extractHandles241(searchRes.data);
 
-    // ── PAGINATION: grab page 2 if cursor available and budget allows ─────────
-    const cursor = searchRes.data?.cursor?.bottom;
-    if (cursor && health.calls < MAX_REQUESTS_PER_RUN * 0.7 && !isLocalAborted()) {
-      const page2 = await callAPI('search',
+    // ── PAGINATION: chain cursor.bottom to pull deeper pages ──────────────────
+    // Loop page 2..MAX_SEARCH_PAGES. Stop early on any of:
+    //   • no cursor returned          (reached the end)
+    //   • cursor didn't change        (twitter repeats the bottom cursor at the end)
+    //   • a page added 0 new handles  (only duplicates left)
+    //   • budget/quota guard or abort (protect the shared plan)
+    let cursor = searchRes.data?.cursor?.bottom;
+    let lastCursor = null;
+    for (let page = 2; page <= MAX_SEARCH_PAGES; page++) {
+      if (!cursor || cursor === lastCursor) break;
+      if (isLocalAborted() || quotaExhaustedGuard()) break;
+      if (health.calls >= MAX_REQUESTS_PER_RUN * 0.7) break; // keep 30% of budget for profile fetches
+      lastCursor = cursor;
+
+      const pageRes = await callAPI('search',
         { query, count: searchCount, type: 'Top', cursor },
         paceWithBreak, keepAlive);
-      health.calls++; health.totalMs += page2.duration_ms;
-      if (page2.success) {
-        health.successes++;
-        rawHandles = [...rawHandles, ...extractHandles241(page2.data)];
-      }
+      health.calls++; health.totalMs += pageRes.duration_ms;
+      if (!pageRes.success) break;
+      health.successes++;
+
+      const before    = rawHandles.length;
+      const merged     = new Set(rawHandles.map(h => h.toLowerCase()));
+      const pageHandles = extractHandles241(pageRes.data);
+      for (const h of pageHandles) if (!merged.has(h.toLowerCase())) { merged.add(h.toLowerCase()); rawHandles.push(h); }
+      const added = rawHandles.length - before;
+      emit('status', { step: 'search', message: `  page ${page}: +${added} new handles (${rawHandles.length} total for this query)`, progress: 0 });
+      if (added === 0) break; // page brought only duplicates — deeper pages won't help
+
+      cursor = pageRes.data?.cursor?.bottom;
     }
 
     // Update cross-query frequency map — handles appearing in multiple queries = higher priority
@@ -780,6 +855,9 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', e
         current: i + 1, total: targets.length,
         key_stats: keyStats(),
       });
+      emit('run_progress', { phase: 'profiles', currentQuery: query,
+        queriesDone: qIdx, totalQueries: totalCompound,
+        overallPct: overallPct(qIdx, (i + 1) / Math.max(targets.length, 1)) });
 
       // twitter241: /user?username=handle
       const r = await callAPI('user', { username: handle }, paceWithBreak, keepAlive);
@@ -1013,6 +1091,7 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', e
 
       const savedDup = await upsertAccount(account, runId);
       if (savedDup) duplicatesSkipped++; else accountsAdded++;
+      await linkTask(account.handle);
 
       emit('account', {
         account:   { ...account, isDuplicate: savedDup, index: idx + 1, total: allToEmit.length },
@@ -1033,6 +1112,8 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', e
         message: `Fetching ${newDirectHandles.length} known influencers from friend's listâ€¦`,
         progress: 95,
       });
+      emit('run_progress', { phase: 'friends', currentQuery: null,
+        queriesDone: totalCompound, totalQueries: totalCompound, overallPct: 96 });
       const directFetched = [];
       for (let i = 0; i < newDirectHandles.length; i++) {
         if (isLocalAborted()) break;
@@ -1115,6 +1196,7 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', e
           };
           const savedDup = await upsertAccount(account, runId);
           if (savedDup) duplicatesSkipped++; else accountsAdded++;
+          await linkTask(account.handle);
           emit('account', { account: { ...account, isDuplicate: savedDup, source: 'friend_list' }, health: calcHealth(health.calls, health.successes, health.errors, health.totalMs, health.flags), durations: [...durations] });
         }
       }
@@ -1157,6 +1239,8 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', e
     likelyPaid:    promoMap['inferred'] || 0,
     health: calcHealth(health.calls, health.successes, health.errors, health.totalMs, health.flags),
   };
+  emit('run_progress', { phase: 'done', currentQuery: null,
+    queriesDone: runManager.totalQueries || 0, totalQueries: runManager.totalQueries || 0, overallPct: 100 });
   emit('complete', summary);
   apiCallSink = null;
   return summary;
@@ -1368,19 +1452,50 @@ app.post('/api/agent/start', require('./middleware/auth').requireAuth, async (re
   res.json({ ok: true, started, totalQueries: queries.length });
 });
 
+// Run a Task — scoped to that task's keywords, links found accounts to the task.
+app.post('/api/tasks/:id/run', require('./middleware/auth').requireAuth, async (req, res) => {
+  if (runManager.active) return res.json({ ok: true, alreadyRunning: true, message: 'A run is already in progress' });
+  const { rows } = await db.execute({ sql: `SELECT * FROM tasks WHERE id = ?`, args: [req.params.id] });
+  if (!rows.length) return res.status(404).json({ error: 'Task not found' });
+
+  let keywords = [];
+  try { keywords = JSON.parse(rows[0].keywords); } catch {}
+  if (!Array.isArray(keywords) || !keywords.length) return res.status(400).json({ error: 'Task has no keywords' });
+
+  const taskId = Number(req.params.id);
+  await db.execute({ sql: `UPDATE tasks SET status='running', last_run_at=datetime('now') WHERE id=?`, args: [taskId] }).catch(() => {});
+
+  const started = startAgentRun({ queries: keywords, directHandles: [], triggeredBy: `task:${rows[0].name}`, taskId });
+  res.json({ ok: true, started, taskId, totalKeywords: keywords.length });
+});
+
 app.get('/api/agent/status', require('./middleware/auth').requireAuth, (req, res) => {
   res.json({
     running:     runManager.active,
     startedAt:   runManager.startedAt ? new Date(runManager.startedAt).toISOString() : null,
     triggeredBy: runManager.triggeredBy,
+    taskId:      runManager.taskId,
     progress:    runManager.progress,
+    phase:       runManager.phase,
+    currentQuery: runManager.currentQuery,
+    queriesDone: runManager.queriesDone,
+    totalQueries: runManager.totalQueries,
     viewers:     runManager.listeners.size,
     lastSummary: runManager.lastSummary,
   });
 });
 
-app.post('/api/agent/stop', require('./middleware/auth').requireAuth, (req, res) => {
-  if (!runManager.active) return res.json({ ok: true, message: 'No run active' });
+app.post('/api/agent/stop', require('./middleware/auth').requireAuth, async (req, res) => {
+  if (!runManager.active) {
+    // No live run, but the DB may show a stale 'running' row (process died mid-run,
+    // e.g. Render free-tier sleep). Clear it so the dashboard stops saying "Running".
+    const r = await db.execute(
+      `UPDATE runs SET status='interrupted', completed_at=datetime('now') WHERE status='running'`
+    ).catch(() => ({ rowsAffected: 0 }));
+    return res.json({ ok: true, cleared: r.rowsAffected || 0,
+      message: r.rowsAffected ? `No live run — cleared ${r.rowsAffected} stale "running" record(s).`
+                              : 'No run active.' });
+  }
   runManager.stopRequested = true;
   res.json({ ok: true, message: 'Stop requested — the run will finish its current request and stop.' });
 });
@@ -1395,6 +1510,8 @@ app.get('/api/health', (req, res) => {
       remaining: rapidQuotaRemaining,
       limit:     rapidQuotaLimit,
       reserve:   QUOTA_MIN_REMAINING,
+      used:      (rapidQuotaLimit != null && rapidQuotaRemaining != null) ? rapidQuotaLimit - rapidQuotaRemaining : null,
+      pct_used:  (rapidQuotaLimit ? Math.round(((rapidQuotaLimit - rapidQuotaRemaining) / rapidQuotaLimit) * 100) : null),
     },
   });
 });
@@ -1437,6 +1554,22 @@ cron.schedule('0 2 * * 1', async () => {
 
 // â”€â”€ Boot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 initDB().then(async () => {
+  // Zombie-run cleanup: any row still 'running' means a previous process died mid-run
+  // (Render free-tier sleep, crash, kill). Mark them interrupted so the dashboard is honest.
+  try {
+    const z = await db.execute(`UPDATE runs SET status='interrupted', completed_at=datetime('now') WHERE status='running'`);
+    if (z.rowsAffected) console.log(`  [boot] Cleared ${z.rowsAffected} stale 'running' run(s) → interrupted`);
+  } catch (e) { console.error('  [boot] zombie-run cleanup failed:', e.message); }
+
+  // Restore last-known shared quota so the dashboard shows it before the first new API call
+  try {
+    const { rows } = await db.execute(`SELECT key, value FROM agent_config WHERE key IN ('rapid_quota_remaining','rapid_quota_limit')`);
+    for (const r of rows) {
+      if (r.key === 'rapid_quota_remaining' && r.value != null) rapidQuotaRemaining = Number(r.value);
+      if (r.key === 'rapid_quota_limit'     && r.value != null) rapidQuotaLimit     = Number(r.value);
+    }
+  } catch {}
+
   app.listen(PORT, () => {
     // Expose keyStats to routes via app.locals
     app.locals.keyStats = keyStats;

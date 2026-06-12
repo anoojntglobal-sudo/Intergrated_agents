@@ -136,14 +136,24 @@ function TopAccountCard({ account }) {
 
 export default function Dashboard() {
   const { apiFetch }             = useAuth();
-  const { running, onRunComplete } = useAgent();
+  const { running, serverActive, runProgress, stopRun, onRunComplete } = useAgent();
   const [stats,      setStats]      = useState(null);
   const [lastRun,    setLastRun]    = useState(null);
+  const [quota,      setQuota]      = useState(null);   // { remaining, limit, used, pct_used, reserve }
   const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error,      setError]      = useState('');
   const [lastFetch,  setLastFetch]  = useState(null);
   const [liveNew,    setLiveNew]    = useState(0);
+  const [stopping,   setStopping]   = useState(false);
+
+  const liveRun = running || serverActive;   // truly active per the status poll
+  const pct     = runProgress?.overallPct ?? 0;
+
+  async function handleStop() {
+    setStopping(true);
+    try { await stopRun(); } finally { setStopping(false); loadStats(true); }
+  }
 
   function loadStats(isRefresh = false) {
     if (isRefresh) setRefreshing(true); else setLoading(true);
@@ -151,10 +161,12 @@ export default function Dashboard() {
     Promise.all([
       apiFetch('/api/dashboard/stats').then(r => r.json()),
       apiFetch('/api/dashboard/last-run').then(r => r.json()).catch(() => ({ lastRun: null })),
+      apiFetch('/api/health').then(r => r.json()).catch(() => null),
     ])
-      .then(([d, lr]) => {
+      .then(([d, lr, h]) => {
         setStats(d);
         setLastRun(lr?.lastRun || null);
+        setQuota(h?.rapid_quota || null);
         setLastFetch(new Date());
         setLoading(false);
         setRefreshing(false);
@@ -191,13 +203,28 @@ export default function Dashboard() {
     <div className="page dashboard-page">
 
       {/* Banners */}
-      {running && (
-        <div className="dash-live-banner">
-          <span className="live-dot" />
-          Agent is running — dashboard refreshes automatically when complete
+      {liveRun && (
+        <div className="dash-live-banner dash-run-active">
+          <div className="dra-top">
+            <span className="live-dot" />
+            <span className="dra-label">
+              Agent running
+              {runProgress?.totalQueries > 0 && ` · query ${runProgress.queriesDone}/${runProgress.totalQueries}`}
+            </span>
+            <span className="dra-pct">{pct}%</span>
+            <button className="btn-danger dra-stop" onClick={handleStop} disabled={stopping}>
+              {stopping ? 'Stopping…' : '■ Stop all fetching'}
+            </button>
+          </div>
+          <div className="dra-bar"><div className="dra-bar-fill" style={{ width: `${pct}%` }} /></div>
+          <div className="dra-sub">
+            {runProgress?.phase ? `Phase: ${runProgress.phase}` : 'Working…'}
+            {runProgress?.currentQuery ? ` · ${runProgress.currentQuery}` : ''}
+            {' '}· refreshes automatically when complete
+          </div>
         </div>
       )}
-      {liveNew > 0 && !running && (
+      {liveNew > 0 && !liveRun && (
         <div className="dash-new-banner">
           ✅ Last run added <strong>{liveNew} new accounts</strong> — data updated
         </div>
@@ -225,6 +252,37 @@ export default function Dashboard() {
         <StatCard label="DM Open"        value={t.dm_open}   color="#F9A825" icon="💬" />
         <StatCard label="Has Email"      value={t.has_email} color="#C084FC" icon="✉" />
       </div>
+
+      {/* Monthly API quota — how much of the shared RapidAPI plan is used */}
+      {quota && quota.limit != null && (() => {
+        const used      = quota.used      ?? (quota.limit - (quota.remaining ?? 0));
+        const pctUsed   = quota.pct_used  ?? Math.round((used / quota.limit) * 100);
+        const remaining = quota.remaining ?? (quota.limit - used);
+        const barColor  = pctUsed >= 90 ? 'var(--red)' : pctUsed >= 70 ? 'var(--gold)' : 'var(--green)';
+        return (
+          <div className="dash-card quota-card" style={{ marginBottom: 16 }}>
+            <div className="dash-card-header">
+              <h3>Monthly API Quota <span className="quota-shared">· shared plan</span></h3>
+              <span style={{ fontSize: 13, color: 'var(--text2)' }}>
+                {used.toLocaleString()} / {quota.limit.toLocaleString()} used
+                <span style={{ color: barColor, fontWeight: 700 }}> · {pctUsed}%</span>
+              </span>
+            </div>
+            <div className="quota-bar">
+              <div className="quota-bar-fill" style={{ width: `${Math.min(100, pctUsed)}%`, background: barColor }} />
+              {quota.reserve != null && quota.limit && (
+                <div className="quota-reserve-mark"
+                     style={{ left: `${Math.min(100, ((quota.limit - quota.reserve) / quota.limit) * 100)}%` }}
+                     title={`Auto-stop reserve: ${quota.reserve.toLocaleString()} left`} />
+              )}
+            </div>
+            <div className="quota-legend">
+              <span><strong style={{ color: barColor }}>{remaining.toLocaleString()}</strong> remaining</span>
+              {quota.reserve != null && <span>auto-stops with <strong>{quota.reserve.toLocaleString()}</strong> in reserve</span>}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Last run breakdown — total fetched + A1/A2/B split */}
       <LastRunCard run={lastRun} />

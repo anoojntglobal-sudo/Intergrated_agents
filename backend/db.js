@@ -78,6 +78,25 @@ CREATE TABLE IF NOT EXISTS agent_config (
   value      TEXT,
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT    NOT NULL,
+  company      TEXT,
+  keywords     TEXT    NOT NULL,             -- JSON array of raw keywords
+  status       TEXT    DEFAULT 'idle',       -- idle | running | done
+  last_run_id  INTEGER,
+  last_run_at  TEXT,
+  created_at   TEXT    DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS task_accounts (
+  task_id   INTEGER NOT NULL,
+  handle    TEXT    NOT NULL,
+  added_at  TEXT    DEFAULT (datetime('now')),
+  PRIMARY KEY (task_id, handle),
+  FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
 `;
 
 // ── Seed keywords from Google Sheets class structure ──────────────────────────
