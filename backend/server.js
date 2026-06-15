@@ -393,6 +393,37 @@ function quotaExhaustedGuard() {
   return rapidQuotaRemaining != null && rapidQuotaRemaining <= QUOTA_MIN_REMAINING;
 }
 
+// ── App-level MONTHLY budget — our own call cap, independent of the shared plan ──
+// The RapidAPI header counter is shared with a friend and can't tell our calls apart,
+// so we keep our OWN monthly counter and hard-stop at MONTHLY_CALL_BUDGET. Persisted
+// to agent_config under a per-month key so it survives restarts and resets each month.
+const MONTHLY_CALL_BUDGET = Math.max(1, Number(process.env.MONTHLY_CALL_BUDGET) || 5000);
+let monthlyCalls    = 0;
+let currentMonthKey = null;
+
+function monthKey(d = new Date()) {
+  return `calls_${d.getUTCFullYear()}_${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+async function loadMonthlyCalls() {
+  currentMonthKey = monthKey();
+  try {
+    const { rows } = await db.execute({ sql: `SELECT value FROM agent_config WHERE key=?`, args: [currentMonthKey] });
+    monthlyCalls = rows[0] ? (Number(rows[0].value) || 0) : 0;
+  } catch { monthlyCalls = 0; }
+}
+function recordCall() {
+  const k = monthKey();
+  if (k !== currentMonthKey) { currentMonthKey = k; monthlyCalls = 0; } // new month → reset
+  monthlyCalls++;
+  db.execute({
+    sql: `INSERT INTO agent_config (key, value, updated_at) VALUES (?, ?, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`,
+    args: [k, String(monthlyCalls)],
+  }).catch(() => {});
+}
+// True once our app has spent its monthly budget — every run/task/resolve stops here
+function monthlyBudgetGuard() { return monthlyCalls >= MONTHLY_CALL_BUDGET; }
+
 // Summarise the response body into a short human string for the log
 function summariseResponse(endpoint, data) {
   try {
@@ -425,6 +456,7 @@ function logApiCall(endpoint, params, status, ok, ms, keyLabel, errMsg, result) 
 async function callAPI(endpoint, params = {}, emitStatus = null, sseKeepAlive = null) {
   const k = await acquireKey(emitStatus, sseKeepAlive);
   const start = Date.now();
+  recordCall(); // count against our own monthly budget (every outbound request)
   try {
     const resp = await axios.get(`${BASE_URL}/${endpoint}`, {
       params,
@@ -452,6 +484,7 @@ async function callAPI(endpoint, params = {}, emitStatus = null, sseKeepAlive = 
         console.log(`[RATE] Immediate retry with ${other.label}`);
         other.lastFiredAt = Date.now(); // mark fired before attempt to prevent immediate re-use
         await sleep(800 + Math.max(0, jitter()));
+        recordCall(); // retry is a second outbound request — count it too
         try {
           const resp2 = await axios.get(`${BASE_URL}/${endpoint}`, {
             params,
@@ -754,8 +787,8 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', t
   for (let qIdx = 0; qIdx < shuffledQueries.length; qIdx++) {
     const query = shuffledQueries[qIdx];
     if (isLocalAborted()) break;
-    if (health.calls >= MAX_REQUESTS_PER_RUN || quotaExhaustedGuard()) {
-      emit('status', { step: 'cap_reached', message: `Stopping before next query — ${quotaExhaustedGuard() ? `monthly quota reserve reached (${rapidQuotaRemaining} left)` : `per-run cap (${MAX_REQUESTS_PER_RUN})`}. Data saved.`, progress: 100 });
+    if (monthlyBudgetGuard() || health.calls >= MAX_REQUESTS_PER_RUN || quotaExhaustedGuard()) {
+      emit('status', { step: 'cap_reached', message: `Stopping before next query — ${monthlyBudgetGuard() ? `monthly app budget reached (${monthlyCalls}/${MONTHLY_CALL_BUDGET} calls used)` : quotaExhaustedGuard() ? `shared-plan reserve reached (${rapidQuotaRemaining} left)` : `per-run cap (${MAX_REQUESTS_PER_RUN})`}. Data saved.`, progress: 100 });
       break;
     }
     emit('run_progress', { phase: 'search', currentQuery: query,
@@ -791,7 +824,7 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', t
     let lastCursor = null;
     for (let page = 2; page <= MAX_SEARCH_PAGES; page++) {
       if (!cursor || cursor === lastCursor) break;
-      if (isLocalAborted() || quotaExhaustedGuard()) break;
+      if (isLocalAborted() || quotaExhaustedGuard() || monthlyBudgetGuard()) break;
       if (health.calls >= MAX_REQUESTS_PER_RUN * 0.7) break; // keep 30% of budget for profile fetches
       lastCursor = cursor;
 
@@ -879,6 +912,14 @@ async function runAgent({ queries, directHandles = [], triggeredBy = 'manual', t
       health.calls++; health.totalMs += r.duration_ms;
       durations.push(r.duration_ms);
 
+      // App monthly budget — hard stop at our own MONTHLY_CALL_BUDGET
+      if (monthlyBudgetGuard()) {
+        emit('status', { step: 'cap_reached',
+          message: `Monthly app budget reached (${monthlyCalls}/${MONTHLY_CALL_BUDGET} calls this month). Stopping. Data saved so far.`,
+          progress: 100 });
+        console.log(`[BUDGET] Run stopped — ${monthlyCalls}/${MONTHLY_CALL_BUDGET} monthly calls used`);
+        break;
+      }
       // Per-run request cap â€” stop gracefully when limit reached
       if (health.calls >= MAX_REQUESTS_PER_RUN) {
         emit('status', { step: 'cap_reached',
@@ -1302,9 +1343,11 @@ async function resolveUnknowns({ scope = 'all', sseRes = null, isAborted = () =>
   try {
     for (let i = 0; i < rows.length; i++) {
       if (isLocalAborted()) break;
-      if (health.calls >= MAX_REQUESTS_PER_RUN || quotaExhaustedGuard()) {
-        emit('status', { step: 'cap_reached', message: quotaExhaustedGuard()
-          ? `Monthly quota reserve reached (${rapidQuotaRemaining} of ${rapidQuotaLimit} left). Stopping. Progress saved.`
+      if (monthlyBudgetGuard() || health.calls >= MAX_REQUESTS_PER_RUN || quotaExhaustedGuard()) {
+        emit('status', { step: 'cap_reached', message: monthlyBudgetGuard()
+          ? `Monthly app budget reached (${monthlyCalls}/${MONTHLY_CALL_BUDGET} calls this month). Stopping. Progress saved.`
+          : quotaExhaustedGuard()
+          ? `Shared-plan reserve reached (${rapidQuotaRemaining} of ${rapidQuotaLimit} left). Stopping. Progress saved.`
           : `Request cap (${MAX_REQUESTS_PER_RUN}) reached — stopping. Progress saved.` });
         break;
       }
@@ -1446,6 +1489,7 @@ app.get('/api/run-demo', require('./middleware/auth').requireAuth, async (req, r
 // Start a run in the background (returns immediately). Watch it via GET /api/run-demo.
 app.post('/api/agent/start', require('./middleware/auth').requireAuth, async (req, res) => {
   if (runManager.active) return res.json({ ok: true, alreadyRunning: true, message: 'A run is already in progress' });
+  if (monthlyBudgetGuard()) return res.json({ ok: false, budgetReached: true, message: `Monthly app budget reached (${monthlyCalls}/${MONTHLY_CALL_BUDGET} calls this month). Resets next month.` });
 
   let queries       = [];
   let directHandles = [];
@@ -1477,6 +1521,7 @@ app.post('/api/agent/start', require('./middleware/auth').requireAuth, async (re
 // Run a Task — scoped to that task's keywords, links found accounts to the task.
 app.post('/api/tasks/:id/run', require('./middleware/auth').requireAuth, async (req, res) => {
   if (runManager.active) return res.json({ ok: true, alreadyRunning: true, message: 'A run is already in progress' });
+  if (monthlyBudgetGuard()) return res.json({ ok: false, budgetReached: true, message: `Monthly app budget reached (${monthlyCalls}/${MONTHLY_CALL_BUDGET} calls this month). Resets next month.` });
   const { rows } = await db.execute({ sql: `SELECT * FROM tasks WHERE id = ?`, args: [req.params.id] });
   if (!rows.length) return res.status(404).json({ error: 'Task not found' });
 
@@ -1535,6 +1580,13 @@ app.get('/api/health', (req, res) => {
       used:      (rapidQuotaLimit != null && rapidQuotaRemaining != null) ? rapidQuotaLimit - rapidQuotaRemaining : null,
       pct_used:  (rapidQuotaLimit ? Math.round(((rapidQuotaLimit - rapidQuotaRemaining) / rapidQuotaLimit) * 100) : null),
     },
+    monthly_calls: {
+      used:     monthlyCalls,
+      budget:   MONTHLY_CALL_BUDGET,
+      remaining: Math.max(0, MONTHLY_CALL_BUDGET - monthlyCalls),
+      pct_used: Math.round((monthlyCalls / MONTHLY_CALL_BUDGET) * 100),
+      month:    currentMonthKey,
+    },
   });
 });
 
@@ -1591,6 +1643,10 @@ initDB().then(async () => {
       if (r.key === 'rapid_quota_limit'     && r.value != null) rapidQuotaLimit     = Number(r.value);
     }
   } catch {}
+
+  // Load our own monthly call counter (app budget, resets each month)
+  await loadMonthlyCalls();
+  console.log(`  [boot] App calls this month: ${monthlyCalls}/${MONTHLY_CALL_BUDGET}`);
 
   app.listen(PORT, () => {
     // Expose keyStats to routes via app.locals

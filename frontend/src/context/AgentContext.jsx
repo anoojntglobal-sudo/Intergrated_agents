@@ -278,6 +278,7 @@ export function AgentProvider({ children }) {
       const qs = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : '';
       const r  = await fetch(`${API}/api/agent/start${qs}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
       const d  = await r.json().catch(() => ({}));
+      if (d.budgetReached) { setConnErr(`⛔ ${d.message}`); addLog(d.message, 'error'); setRunning(false); return; }
       if (d.alreadyRunning) addLog('A run was already in progress — attaching to it.', 'warn');
       else addLog(`Agent started${d.totalQueries ? ` — ${d.totalQueries} queries` : ''}. Runs in the background — safe to close this tab.`, 'success');
     } catch {
@@ -304,6 +305,7 @@ export function AgentProvider({ children }) {
     try {
       const r = await fetch(`${API}/api/tasks/${taskId}/run`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
       const d = await r.json().catch(() => ({}));
+      if (d.budgetReached) { setConnErr(`⛔ ${d.message}`); addLog(d.message, 'error'); setRunning(false); return; }
       if (d.alreadyRunning) addLog('A run was already in progress — attaching to it.', 'warn');
       else addLog(`Task started${d.totalKeywords ? ` — ${d.totalKeywords} keywords` : ''}. Runs in the background.`, 'success');
     } catch {

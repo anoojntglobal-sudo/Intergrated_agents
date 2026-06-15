@@ -140,6 +140,7 @@ export default function Dashboard() {
   const [stats,      setStats]      = useState(null);
   const [lastRun,    setLastRun]    = useState(null);
   const [quota,      setQuota]      = useState(null);   // { remaining, limit, used, pct_used, reserve }
+  const [monthly,    setMonthly]    = useState(null);   // { used, budget, remaining, pct_used }
   const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error,      setError]      = useState('');
@@ -167,6 +168,7 @@ export default function Dashboard() {
         setStats(d);
         setLastRun(lr?.lastRun || null);
         setQuota(h?.rapid_quota || null);
+        setMonthly(h?.monthly_calls || null);
         setLastFetch(new Date());
         setLoading(false);
         setRefreshing(false);
@@ -252,6 +254,30 @@ export default function Dashboard() {
         <StatCard label="DM Open"        value={t.dm_open}   color="#F9A825" icon="💬" />
         <StatCard label="Has Email"      value={t.has_email} color="#C084FC" icon="✉" />
       </div>
+
+      {/* App monthly budget — our own hard cap (the binding limit) */}
+      {monthly && monthly.budget != null && (() => {
+        const pct      = monthly.pct_used ?? Math.round((monthly.used / monthly.budget) * 100);
+        const barColor = pct >= 90 ? 'var(--red)' : pct >= 70 ? 'var(--gold)' : 'var(--green)';
+        return (
+          <div className="dash-card quota-card" style={{ marginBottom: 16 }}>
+            <div className="dash-card-header">
+              <h3>App API Budget <span className="quota-shared">· this month (hard cap)</span></h3>
+              <span style={{ fontSize: 13, color: 'var(--text2)' }}>
+                {monthly.used.toLocaleString()} / {monthly.budget.toLocaleString()} calls
+                <span style={{ color: barColor, fontWeight: 700 }}> · {pct}%</span>
+              </span>
+            </div>
+            <div className="quota-bar">
+              <div className="quota-bar-fill" style={{ width: `${Math.min(100, pct)}%`, background: barColor }} />
+            </div>
+            <div className="quota-legend">
+              <span><strong style={{ color: barColor }}>{(monthly.remaining ?? (monthly.budget - monthly.used)).toLocaleString()}</strong> calls left this month</span>
+              <span>auto-stops every run at {monthly.budget.toLocaleString()}</span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Monthly API quota — how much of the shared RapidAPI plan is used */}
       {quota && quota.limit != null && (() => {
