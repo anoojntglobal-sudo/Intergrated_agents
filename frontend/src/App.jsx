@@ -6,6 +6,7 @@ import ProtectedRoute from './components/ProtectedRoute';
 import LoginPage      from './pages/LoginPage';
 import LandingPage          from './pages/LandingPage';
 import BrandVisibilityPage  from './pages/BrandVisibilityPage';
+import LinkedinAgentPage    from './pages/LinkedinAgentPage';
 import PRAgentPage          from './pages/PRAgentPage';
 import LeaderboardAgentPage from './pages/LeaderboardAgentPage';
 import Dashboard      from './pages/Dashboard';
@@ -58,6 +59,7 @@ export default function App() {
       {/* Platform shell: landing + agent sections (no sidebar) */}
       <Route path="/"            element={<ProtectedRoute><LandingPage /></ProtectedRoute>} />
       <Route path="/brand"       element={<ProtectedRoute><BrandVisibilityPage /></ProtectedRoute>} />
+      <Route path="/brand/linkedin" element={<ProtectedRoute><LinkedinAgentPage /></ProtectedRoute>} />
       <Route path="/pr"          element={<ProtectedRoute><PRAgentPage /></ProtectedRoute>} />
       <Route path="/leaderboard" element={<ProtectedRoute><LeaderboardAgentPage /></ProtectedRoute>} />
 
