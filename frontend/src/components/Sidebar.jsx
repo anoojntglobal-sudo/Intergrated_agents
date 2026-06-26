@@ -3,10 +3,9 @@ import { useAuth }  from '../context/AuthContext';
 import { useAgent } from '../context/AgentContext';
 
 const NAV = [
-  { to: '/',            icon: '▦',  label: 'Dashboard'   },
+  { to: '/dashboard',   icon: '▦',  label: 'Dashboard'   },
   { to: '/agent',       icon: '⚡', label: 'Run Agent'   },
   { to: '/tasks',       icon: '🎯', label: 'Tasks'       },
-  { to: '/market-intel',icon: '🛰️', label: 'Market Intel' },
   { to: '/accounts',    icon: '◉',  label: 'All Accounts' },
   { to: '/influencers', icon: '★',  label: 'Track A'      },
   { to: '/pr-pages',    icon: '📢', label: 'Track B'      },
@@ -43,6 +42,11 @@ export default function Sidebar() {
         <span className="logo-tag">X Agent</span>
       </div>
 
+      <NavLink to="/" className="sidebar-back" title="Back to all agents">
+        <span className="nav-icon">←</span>
+        <span className="nav-label">All agents</span>
+      </NavLink>
+
       <nav className="sidebar-nav">
         {NAV.map(({ to, icon, label }) => {
           const isAgentLink = to === '/agent';
@@ -50,7 +54,7 @@ export default function Sidebar() {
             <NavLink
               key={to}
               to={to}
-              end={to === '/'}
+              end={to === '/dashboard'}
               className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
             >
               <span className="nav-icon">{icon}</span>

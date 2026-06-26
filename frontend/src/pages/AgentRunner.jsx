@@ -157,7 +157,7 @@ export default function AgentRunner() {
           {(summary.likelyPaid ?? 0) > 0 && (
             <span style={{color:'#F9A825'}}> &middot; {summary.likelyPaid} likely paid (A2)</span>
           )}
-          {' '}<button className="link-btn" onClick={() => navigate('/')}>View Dashboard</button>
+          {' '}<button className="link-btn" onClick={() => navigate('/dashboard')}>View Dashboard</button>
         </div>
       )}
 

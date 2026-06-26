@@ -1,21 +1,31 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:       #060E18;
-  --bg2:      #0A1828;
-  --bg3:      #0F2034;
-  --border:   #1A2E44;
-  --blue:     #1D9BF0;
-  --green:    #00C896;
-  --gold:     #F9A825;
-  --red:      #FF4444;
+  /* Summit dark theme (neuform-staff-featured-2026-05-22) */
+  --bg:       #050510;   /* background */
+  --bg2:      #0E0E16;   /* raised panel / sidebar */
+  --bg3:      #18181B;   /* surface */
+  --surface:  #18181B;
+  --border:   #27272A;
+  --blue:     #2563EB;   /* primary */
+  --primary:  #2563EB;
+  --accent:   #3B82F6;
+  --green:    #10B981;   /* functional: success */
+  --gold:     #F59E0B;   /* functional: warning */
+  --red:      #EF4444;   /* functional: error */
   --purple:   #A78BFA;
-  --text:     #E8F4FD;
-  --text2:    #7DA4BE;
+  --text:     #FFFFFF;
+  --text2:    #A1A1AA;
+  --text-dim: #71717A;
+  --mono:     'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  --r-card:   23px;      /* card radius */
+  --r-control:18px;      /* button / input radius */
+  --r-pill:   9999px;
   --sidebar-w: 220px;
 }
 
-body { background: var(--bg); color: var(--text); font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.5; }
+body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.5; }
+code, .mono, pre { font-family: var(--mono); }
 
 /* ── Full-page loader ──────────────────────────────────────────────────────── */
 .full-loader { display: flex; align-items: center; justify-content: center; height: 100vh; background: var(--bg); }
@@ -737,3 +747,76 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', 'Segoe U
 .ka-table td { padding: 7px 10px; border-bottom: 1px solid rgba(255,255,255,.04); vertical-align: top; }
 .ka-table tr:hover td { background: var(--bg3); }
 .ka-table a { color: var(--blue); text-decoration: none; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   PLATFORM SHELL — Summit dark theme (login · landing · agent sections)
+   ════════════════════════════════════════════════════════════════════════════ */
+.platform-shell {
+  min-height: 100vh; background:
+    radial-gradient(1100px 600px at 50% -10%, rgba(37,99,235,.18), transparent 60%),
+    radial-gradient(800px 500px at 90% 10%, rgba(59,130,246,.10), transparent 55%),
+    var(--bg);
+  color: var(--text); display: flex; flex-direction: column;
+}
+.shell-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 20px 40px; border-bottom: 1px solid var(--border);
+}
+.shell-brand { font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+.shell-brand .k { color: #fff; } .shell-brand .ai { color: var(--primary); }
+.shell-brand .tag { font-family: var(--mono); font-size: 10px; color: var(--text2); letter-spacing: .12em; text-transform: uppercase; margin-left: 10px; }
+.shell-userbox { display: flex; align-items: center; gap: 14px; font-size: 13px; color: var(--text2); }
+.shell-logout { background: none; border: 1px solid var(--border); color: var(--text2); padding: 7px 14px; border-radius: var(--r-control); cursor: pointer; font-size: 12px; transition: .15s; }
+.shell-logout:hover { border-color: var(--primary); color: #fff; }
+
+.shell-main { flex: 1; max-width: 1120px; width: 100%; margin: 0 auto; padding: 64px 40px 80px; }
+.shell-eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--primary); margin-bottom: 14px; }
+.shell-h1 { font-size: 40px; font-weight: 800; letter-spacing: -.025em; line-height: 1.08; margin-bottom: 14px; max-width: 16ch; }
+.shell-sub { font-size: 16px; color: var(--text2); max-width: 60ch; margin-bottom: 44px; line-height: 1.6; }
+.back-to-platform { display: inline-flex; align-items: center; gap: 6px; color: var(--text2); text-decoration: none; font-size: 13px; margin-bottom: 22px; transition: .15s; }
+.back-to-platform:hover { color: #fff; }
+
+/* sidebar "back to all agents" link (X Agent dashboard) */
+.sidebar-back { display: flex; align-items: center; gap: 10px; margin: 0 12px 10px; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--r-control); color: var(--text2); text-decoration: none; font-size: 13px; transition: .15s; }
+.sidebar-back:hover { border-color: var(--primary); color: #fff; background: var(--bg3); }
+.sidebar-back .nav-icon { font-size: 15px; }
+
+.agent-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+@media (max-width: 900px){ .agent-grid { grid-template-columns: 1fr; } }
+.agent-option-card {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-card); padding: 28px; cursor: pointer; text-decoration: none; color: inherit;
+  display: flex; flex-direction: column; gap: 12px; min-height: 230px;
+  transition: transform .22s ease, border-color .22s ease, box-shadow .22s ease;
+  animation: cardIn .5s ease both;
+}
+.agent-option-card:hover { transform: translateY(-6px); border-color: var(--primary); box-shadow: 0 18px 50px -20px rgba(37,99,235,.55); }
+.agent-option-card.disabled { cursor: default; opacity: .72; }
+.agent-option-card.disabled:hover { transform: none; border-color: var(--border); box-shadow: none; }
+.aoc-icon { width: 52px; height: 52px; border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 26px; background: linear-gradient(135deg, rgba(37,99,235,.25), rgba(59,130,246,.12)); border: 1px solid var(--border); }
+.aoc-title { font-size: 19px; font-weight: 700; letter-spacing: -.01em; }
+.aoc-desc { font-size: 13.5px; color: var(--text2); line-height: 1.55; flex: 1; }
+.aoc-status { font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; padding: 4px 10px; border-radius: var(--r-pill); align-self: flex-start; }
+.aoc-status.live { background: rgba(16,185,129,.15); color: #34D399; }
+.aoc-status.soon { background: rgba(245,158,11,.15); color: #FBBF24; }
+.aoc-status.partner { background: rgba(167,139,250,.15); color: #C4B5FD; }
+.aoc-cta { font-size: 13px; color: var(--primary); font-weight: 600; }
+@keyframes cardIn { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+
+.placeholder-wrap { background: var(--surface); border: 1px dashed var(--border); border-radius: var(--r-card); padding: 56px 40px; text-align: center; }
+.placeholder-wrap h2 { font-size: 24px; margin-bottom: 10px; }
+.placeholder-wrap p { color: var(--text2); max-width: 56ch; margin: 0 auto 8px; }
+
+/* re-themed login */
+.login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(900px 500px at 50% -10%, rgba(37,99,235,.20), transparent 60%), var(--bg); }
+.login-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); padding: 40px; width: 380px; box-shadow: 0 30px 80px -30px rgba(0,0,0,.8); }
+.login-logo { text-align: center; margin-bottom: 26px; }
+.login-subtitle { font-size: 12px; color: var(--text2); margin-top: 6px; }
+.login-form .field-group { margin-bottom: 16px; }
+.login-form label { display: block; font-size: 12px; color: var(--text2); margin-bottom: 6px; }
+.login-form input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-control); padding: 11px 14px; color: #fff; font-size: 14px; }
+.login-form input:focus { outline: none; border-color: var(--primary); }
+.login-btn { width: 100%; background: var(--primary); color: #fff; border: none; border-radius: var(--r-control); padding: 12px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 6px; transition: .15s; }
+.login-btn:hover:not(:disabled) { background: #1d4fd7; }
+.login-error { color: var(--red); font-size: 13px; margin-bottom: 12px; }

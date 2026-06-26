@@ -29,7 +29,7 @@ export default function LoginPage() {
       <div className="login-card">
         <div className="login-logo">
           <span className="logo-kite">Kite</span><span className="logo-ai">AI</span>
-          <div className="login-subtitle">X Agent — Influencer & PR Discovery</div>
+          <div className="login-subtitle">Multi-Agent Growth Platform</div>
         </div>
 
         <form onSubmit={handleSubmit} className="login-form">
