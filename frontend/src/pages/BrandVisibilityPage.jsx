@@ -8,9 +8,10 @@ const PLATFORM_AGENTS = [
     cta: 'Open dashboard',
   },
   {
-    icon: 'in', title: 'LinkedIn Agent', status: 'soon', statusLabel: 'Coming soon', to: null,
-    desc: 'The same brand-visibility engine tuned for LinkedIn — relevant conversations, decision-maker discovery, and market signal across the professional graph.',
-    cta: 'Coming soon',
+    icon: 'in', title: 'LinkedIn Agent', status: 'live', statusLabel: 'Active',
+    to: '/brand/linkedin',
+    desc: 'Voice AI builder signals from LinkedIn — discovers technical talent, surfaces relevant conversations, and tracks the field across the professional graph.',
+    cta: 'Open dashboard',
   },
   {
     icon: '⋯', title: 'More platforms', status: 'soon', statusLabel: 'Planned', to: null,

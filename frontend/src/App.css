@@ -868,3 +868,23 @@ code, .mono, pre { font-family: var(--mono); }
   .ambient-grid, .status-pill .dot { animation: none; }
   .shell-h1, .shell-eyebrow, .shell-sub, .agent-option-card, .login-card, .placeholder-wrap { animation: none; }
 }
+
+/* ── LinkedIn Agent embedded dashboard ───────────────────────────────────── */
+.linkedin-iframe-wrap {
+  position: relative;
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  overflow: hidden;
+  margin-top: 24px;
+  min-height: calc(100vh - 320px);
+  animation: cardIn .55s cubic-bezier(.2,.7,.2,1) both;
+}
+.linkedin-iframe {
+  width: 100%;
+  height: calc(100vh - 320px);
+  border: 0;
+  display: block;
+  background: transparent;
+}
