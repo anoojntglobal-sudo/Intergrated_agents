@@ -40,7 +40,27 @@
   </table>
 </div>
 
+{# Pagination (Phase 4c). Buttons/select mutate the shared Alpine offset/limit
+   (scope on <main>) then call reload(); the new offset/limit ride to the server
+   via the hidden inputs in #filters. Offsets/disabled states are computed
+   server-side and embedded so this template stays logic-free. #}
 <div class="pagination">
-  <span>Showing {{ (offset + 1) if posts else 0 }}&ndash;{{ offset + posts|length }} of {{ total }}</span>
-  {# Pagination controls arrive in Phase 4c — counts only for now. #}
+  <button type="button" class="page-btn"
+          {% if not has_prev %}disabled{% endif %}
+          @click="offset = {{ prev_offset }}; reload()">&larr; Prev</button>
+
+  <span class="page-range">{{ page_start }}&ndash;{{ page_end }} of {{ total }}</span>
+
+  <button type="button" class="page-btn"
+          {% if not has_next %}disabled{% endif %}
+          @click="offset = {{ next_offset }}; reload()">Next &rarr;</button>
+
+  <label class="page-size">
+    Page size
+    <select @change="limit = parseInt($event.target.value); offset = 0; reload()">
+      {% for size in page_sizes %}
+      <option value="{{ size }}" {% if size == limit %}selected{% endif %}>{{ size }}</option>
+      {% endfor %}
+    </select>
+  </label>
 </div>
