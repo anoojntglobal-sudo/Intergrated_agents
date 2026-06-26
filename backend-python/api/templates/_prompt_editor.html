@@ -8,10 +8,15 @@
     <span class="ro-meta">updated {{ updated_display }}</span>
   </div>
 
-  {% if status %}<div class="status status-{{ status.type }}">{{ status.message }}</div>{% endif %}
+  {% if status %}
+  <div class="status status-{{ status.type }}"
+       x-data="{ show: true }" x-show="show"
+       x-init="setTimeout(() => show = false, 5000)">{{ status.message }}</div>
+  {% endif %}
 
   <form hx-post="/dashboard/linkedin/_prompt-editor"
-        hx-target="closest .control-body" hx-swap="outerHTML">
+        hx-target="closest .control-body" hx-swap="outerHTML"
+        hx-disabled-elt="find button">
     <label class="field-label" for="pe-text">Prompt text</label>
     <textarea id="pe-text" name="prompt_text" rows="20" cols="80" class="prompt-textarea"
               x-on:input="count = $event.target.value.length">{{ prompt_text }}</textarea>
@@ -25,6 +30,9 @@
              placeholder="e.g., {{ next_version }} (blank = auto)">
     </div>
 
-    <button type="submit" class="btn-primary">Save prompt</button>
+    <button type="submit" class="btn-primary save-btn">
+      <span class="save-text">Save prompt</span>
+      <span class="saving-text">Saving…</span>
+    </button>
   </form>
 </div>

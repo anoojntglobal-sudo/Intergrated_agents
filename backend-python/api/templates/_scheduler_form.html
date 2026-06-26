@@ -2,10 +2,15 @@
    from db.get_schedule(); saves to PUT /dashboard/linkedin/_scheduler-form which
    re-renders this whole .control-body with a status banner. #}
 <div class="control-body">
-  {% if status %}<div class="status status-{{ status.type }}">{{ status.message }}</div>{% endif %}
+  {% if status %}
+  <div class="status status-{{ status.type }}"
+       x-data="{ show: true }" x-show="show"
+       x-init="setTimeout(() => show = false, 5000)">{{ status.message }}</div>
+  {% endif %}
 
   <form hx-put="/dashboard/linkedin/_scheduler-form"
-        hx-target="closest .control-body" hx-swap="outerHTML">
+        hx-target="closest .control-body" hx-swap="outerHTML"
+        hx-disabled-elt="find button">
 
     <div class="field-row">
       <label class="check" for="sf-enabled">
@@ -69,6 +74,9 @@
       <span class="ro-meta">Last run: {{ last_run_display }} &middot; Next run: {{ next_run_display }}</span>
     </div>
 
-    <button type="submit" class="btn-primary">Save schedule</button>
+    <button type="submit" class="btn-primary save-btn">
+      <span class="save-text">Save schedule</span>
+      <span class="saving-text">Saving…</span>
+    </button>
   </form>
 </div>

@@ -16,6 +16,11 @@
   {{ keywords_queried or 0 }} keywords queried,
   {{ posts_ingested or 0 }} posts ingested,
   {{ posts_classified or 0 }} classified.
+  {# Polling stopped (no hx-trigger). On completion, refresh the KPI strip once:
+     this hidden element fires on insertion and swaps the top-of-page #kpi-strip. #}
+  <span hidden
+        hx-get="/dashboard/linkedin/_kpi-strip"
+        hx-trigger="load" hx-target="#kpi-strip" hx-swap="outerHTML"></span>
 </div>
 {% else %}
 <div id="run-status-poll" class="status status-error">

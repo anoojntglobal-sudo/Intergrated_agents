@@ -1,4 +1,5 @@
 {# Posts table partial — rendered server-side, swapped into #posts-table-area by HTMX. #}
+{% if posts %}
 <div class="table-scroll">
   <table class="posts-table">
     <thead>
@@ -33,17 +34,20 @@
         <td>{{ post.posted_at_display }}</td>
         <td>{% if post.post_url %}<a href="{{ post.post_url }}" target="_blank" rel="noopener">&#8599;</a>{% else %}—{% endif %}</td>
       </tr>
-      {% else %}
-      <tr><td colspan="12" class="empty">No posts match the current filters.</td></tr>
       {% endfor %}
     </tbody>
   </table>
 </div>
+{% else %}
+{# Empty state (Phase 4d) — a centered placeholder, not a table row. #}
+<div class="empty-state">No posts match the current filters. Try adjusting tier or category.</div>
+{% endif %}
 
 {# Pagination (Phase 4c). Buttons/select mutate the shared Alpine offset/limit
    (scope on <main>) then call reload(); the new offset/limit ride to the server
    via the hidden inputs in #filters. Offsets/disabled states are computed
-   server-side and embedded so this template stays logic-free. #}
+   server-side and embedded so this template stays logic-free. Hidden when empty. #}
+{% if total %}
 <div class="pagination">
   <button type="button" class="page-btn"
           {% if not has_prev %}disabled{% endif %}
@@ -64,3 +68,4 @@
     </select>
   </label>
 </div>
+{% endif %}

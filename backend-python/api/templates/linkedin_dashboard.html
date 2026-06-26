@@ -9,47 +9,22 @@
   <script defer src="/static/js/alpine.min.js"></script>
 </head>
 <body>
+  <!-- .page: full-width but capped + centered so the dashboard reads well both
+       standalone and inside teammate's React iframe (Phase 4d). -->
+  <div class="page">
+
+  {# Header hidden in embedded mode — the host React app already shows agent context. #}
+  {% if not embedded %}
   <header class="site-header">
     <h1>Brand Visibility Agent — LinkedIn</h1>
     <p class="subtitle">Voice AI builder signals from LinkedIn</p>
   </header>
+  {% endif %}
 
-  <!-- KPI strip: 2 rows of 4 (row 1 totals, row 2 tiers) -->
-  <section class="kpi-strip" aria-label="Key metrics">
-    <div class="kpi-card">
-      <span class="kpi-label">Total posts</span>
-      <span class="kpi-value">{{ stats.total_posts }}</span>
-    </div>
-    <div class="kpi-card">
-      <span class="kpi-label">Unique authors</span>
-      <span class="kpi-value">{{ stats.unique_authors }}</span>
-    </div>
-    <div class="kpi-card">
-      <span class="kpi-label">Most recent scrape</span>
-      <span class="kpi-value kpi-value-sm">{{ most_recent_display }}</span>
-    </div>
-    <div class="kpi-card">
-      <span class="kpi-label">API budget remaining</span>
-      <span class="kpi-value">{{ stats.monthly_api_budget.remaining }}<span class="kpi-suffix"> / {{ stats.monthly_api_budget.limit }}</span></span>
-    </div>
-
-    <div class="kpi-card kpi-tier kpi-tier-1">
-      <span class="kpi-label">Tier 1 · Engage</span>
-      <span class="kpi-value">{{ stats.tier_counts.TIER_1_ENGAGE }}</span>
-    </div>
-    <div class="kpi-card kpi-tier kpi-tier-2">
-      <span class="kpi-label">Tier 2 · Watch</span>
-      <span class="kpi-value">{{ stats.tier_counts.TIER_2_WATCH }}</span>
-    </div>
-    <div class="kpi-card kpi-tier kpi-tier-3">
-      <span class="kpi-label">Tier 3 · Signal</span>
-      <span class="kpi-value">{{ stats.tier_counts.TIER_3_SIGNAL }}</span>
-    </div>
-    <div class="kpi-card kpi-tier kpi-tier-4">
-      <span class="kpi-label">Tier 4 · Noise</span>
-      <span class="kpi-value">{{ stats.tier_counts.TIER_4_NOISE }}</span>
-    </div>
-  </section>
+  {# KPI strip — server-rendered on first paint via include (real numbers, no
+     flash); the SAME partial backs GET /_kpi-strip, which refreshes these after
+     a manual run completes. #}
+  {% include "_kpi_strip.html" %}
 
   <!-- Alpine scope spans the sidebar AND the table area so pagination controls
        (rendered inside the table partial) share offset/limit state with the
@@ -137,6 +112,13 @@
        fast. -->
   <section class="controls" aria-label="Controls">
     <details class="control-panel">
+      <summary>Cost summary</summary>
+      <div hx-get="/dashboard/linkedin/_cost-view"
+           hx-trigger="toggle from:closest details" hx-swap="innerHTML">
+        <p class="loading">Loading cost summary…</p>
+      </div>
+    </details>
+    <details class="control-panel">
       <summary>Classifier prompt</summary>
       <div hx-get="/dashboard/linkedin/_prompt-editor"
            hx-trigger="toggle from:closest details" hx-swap="innerHTML">
@@ -163,7 +145,15 @@
     KA018 sweep runs: {{ footer.runs_total }} total
     &nbsp;|&nbsp; Last run: {{ footer.last_run }}
     &nbsp;|&nbsp; Posts this month: {{ footer.posts_this_month }}
+    {# Live wall clock — a lightweight "page is fresh" indicator, ticks via Alpine. #}
+    &nbsp;|&nbsp; Updated
+    <span class="footer-clock"
+          x-data="{ t: new Date().toLocaleTimeString() }"
+          x-init="setInterval(() => t = new Date().toLocaleTimeString(), 1000)"
+          x-text="t"></span>
   </footer>
+
+  </div><!-- /.page -->
 
   <!-- Initialize Alpine directives inside HTMX-swapped content (filter/pagination
        controls in the posts partial, char counter in the prompt editor). Alpine

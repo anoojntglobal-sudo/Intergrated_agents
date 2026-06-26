@@ -359,9 +359,72 @@ body {
 .status-error   { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
 .status-running { background: #f1f5f9; color: var(--color-muted); border: 1px solid var(--color-border); }
 
+/* ─────────────────────────────────────────────────────────────
+ * Phase 4d — page wrapper, cost view, htmx indicators, empty state
+ * ───────────────────────────────────────────────────────────── */
+
+/* Iframe-friendly: full width, capped, centered. */
+body { padding: 0; }
+.page { width: 100%; max-width: 1400px; margin: 0 auto; }
+
+/* Cost summary panel */
+.cost-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space);
+  margin-bottom: var(--space);
+}
+.cost-table-scroll { margin-bottom: 10px; }
+.cost-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.cost-table thead th {
+  text-align: left;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-muted);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: #f8fafc;
+}
+.cost-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+.cost-table .num {
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+}
+.cost-table td.empty { text-align: center; color: var(--color-muted); }
+.cost-avg { font-size: 0.8rem; color: var(--color-muted); margin: 0; }
+
+/* HTMX in-flight indicator: swap "Save" <-> "Saving…" on the save buttons.
+   htmx adds .htmx-request to the requesting <form> for the request's duration. */
+.saving-text { display: none; }
+.htmx-request .save-text { display: none; }
+.htmx-request .saving-text { display: inline; }
+
+/* Empty state for the posts table (centered card, not a row) */
+.empty-state {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: calc(var(--space) * 3);
+  text-align: center;
+  color: var(--color-muted);
+  font-size: 0.9rem;
+}
+
+.footer-clock { font-variant-numeric: tabular-nums; }
+
 /* Mobile: stack sidebar above content; narrower KPI grid; table scrolls in-place */
 @media (max-width: 768px) {
   .kpi-strip { grid-template-columns: repeat(2, 1fr); }
+  .cost-kpis { grid-template-columns: repeat(2, 1fr); }
   .layout { flex-direction: column; }
   .sidebar { flex: 1 1 auto; width: 100%; }
   .field-row > label:not(.check) { flex-basis: 100%; }

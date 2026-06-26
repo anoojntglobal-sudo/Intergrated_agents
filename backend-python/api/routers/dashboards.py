@@ -10,6 +10,11 @@ plus pagination. The mutating panels POST/PUT to *dashboard* wrapper endpoints
 here that reuse the Phase 1-3 JSON handlers as the single source of truth, then
 return HTML partials (HTMX swaps them in place). This keeps form posts simple
 (form-encoded, no json-enc extension) and the JSON API untouched.
+
+Phase 4d: cost-summary panel, a standalone KPI-strip partial (shared by first
+paint and the post-run refresh), an ?embedded=true mode for iframe hosting, and
+assorted polish. Still no new JSON API endpoints — cost data reuses the Phase 2
+/api/linkedin/cost-summary handler.
 """
 from __future__ import annotations
 
@@ -30,7 +35,9 @@ from api.routers.linkedin import (
     UpdatePromptRequest,
     UpdateScheduleRequest,
     _next_prompt_version,
+    _scalar,
     active_prompt as linkedin_active_prompt,
+    cost_summary as linkedin_cost_summary,
     get_db,
     posts as linkedin_posts,
     run_now as linkedin_run_now,
@@ -72,10 +79,19 @@ def _duration(started, completed) -> str:
 PAGE_SIZES = [25, 50, 100, 200]
 
 
-@router.get("/dashboard/linkedin", response_class=HTMLResponse)
-def linkedin_dashboard(request: Request, db: LinkedInDatabase = Depends(get_db)):
+def _kpi_context(db: LinkedInDatabase) -> dict:
+    """Context for the KPI strip — shared by the full-page render (via include)
+    and the standalone /_kpi-strip refresh endpoint (Phase 4d, DRY)."""
     s = linkedin_stats(db)  # reuse the /api/linkedin/stats logic -> LinkedinStatsResponse
+    return {"stats": s, "most_recent_display": _fmt_ts(s.most_recent_scrape)}
 
+
+@router.get("/dashboard/linkedin", response_class=HTMLResponse)
+def linkedin_dashboard(
+    request: Request,
+    embedded: bool = Query(False),
+    db: LinkedInDatabase = Depends(get_db),
+):
     runs_total = db.query("SELECT COUNT(*) AS c FROM linkedin_runs")[0]["c"]
     last_run = db.query("SELECT MAX(started_at) AS m FROM linkedin_runs")[0]["m"]
     posts_month = db.query(
@@ -84,8 +100,8 @@ def linkedin_dashboard(request: Request, db: LinkedInDatabase = Depends(get_db))
     )[0]["c"]
 
     context = {
-        "stats": s,
-        "most_recent_display": _fmt_ts(s.most_recent_scrape),
+        **_kpi_context(db),                 # stats, most_recent_display (for the included KPI strip)
+        "embedded": embedded,               # ?embedded=true hides the header for iframe hosting
         "footer": {
             "runs_total": runs_total,
             "last_run": _fmt_ts(last_run),
@@ -93,6 +109,14 @@ def linkedin_dashboard(request: Request, db: LinkedInDatabase = Depends(get_db))
         },
     }
     return templates.TemplateResponse(request, "linkedin_dashboard.html", context)
+
+
+@router.get("/dashboard/linkedin/_kpi-strip", response_class=HTMLResponse)
+def kpi_strip(request: Request, db: LinkedInDatabase = Depends(get_db)):
+    """Just the KPI strip — fetched on the initial page render via {% include %}
+    is server-side, but this endpoint lets the post-run-completion poller refresh
+    the live numbers without a full reload."""
+    return templates.TemplateResponse(request, "_kpi_strip.html", _kpi_context(db))
 
 
 @router.get("/dashboard/linkedin/_posts-table", response_class=HTMLResponse)
@@ -108,31 +132,40 @@ def linkedin_posts_table(
 ):
     """HTML partial (table + counts) for HTMX filter updates. Reuses the Phase 2
     /api/linkedin/posts query logic (single source of truth) and adds a
-    pre-formatted posted_at_display for the template."""
-    resp = linkedin_posts(
-        db, limit=limit, offset=offset, tier=tier,
-        category=category or None, source_class=source_class or None, sort_by=sort_by,
-    )
-    rows = []
-    for p in resp.posts:
-        d = p.model_dump()
-        d["posted_at_display"] = _fmt_ts(p.posted_at)
-        rows.append(d)
+    pre-formatted posted_at_display for the template.
 
-    page_start = (resp.offset + 1) if rows else 0
-    page_end = resp.offset + len(rows)
+    Empty-tier short-circuit (Phase 4d): on this dashboard the tier checkboxes are
+    the primary filter, so "no tier selected" means show nothing (drives the empty
+    state) rather than the JSON API's "no tier filter -> all rows". The JSON
+    endpoint is unchanged; only this dashboard wrapper interprets it this way."""
+    if not tier:
+        rows, total, eff_offset = [], 0, 0
+    else:
+        resp = linkedin_posts(
+            db, limit=limit, offset=offset, tier=tier,
+            category=category or None, source_class=source_class or None, sort_by=sort_by,
+        )
+        rows = []
+        for p in resp.posts:
+            d = p.model_dump()
+            d["posted_at_display"] = _fmt_ts(p.posted_at)
+            rows.append(d)
+        total, eff_offset = resp.total, resp.offset
+
+    page_start = (eff_offset + 1) if rows else 0
+    page_end = eff_offset + len(rows)
     context = {
         "posts": rows,
-        "total": resp.total,
-        "limit": resp.limit,
-        "offset": resp.offset,
+        "total": total,
+        "limit": limit,
+        "offset": eff_offset,
         # Pagination (Phase 4c): all derived server-side so the template stays dumb.
         "page_start": page_start,
         "page_end": page_end,
-        "prev_offset": max(0, resp.offset - resp.limit),
-        "next_offset": resp.offset + resp.limit,
-        "has_prev": resp.offset > 0,
-        "has_next": (resp.offset + resp.limit) < resp.total,
+        "prev_offset": max(0, eff_offset - limit),
+        "next_offset": eff_offset + limit,
+        "has_prev": eff_offset > 0,
+        "has_next": (eff_offset + limit) < total,
         "page_sizes": PAGE_SIZES,
     }
     return templates.TemplateResponse(request, "_posts_table.html", context)
@@ -169,12 +202,19 @@ def prompt_editor(request: Request, db: LinkedInDatabase = Depends(get_db)):
 @router.post("/dashboard/linkedin/_prompt-editor", response_class=HTMLResponse)
 def prompt_editor_save(
     request: Request,
-    prompt_text: str = Form(...),
-    prompt_version: str = Form(""),
+    prompt_text: str = Form(""),     # default "" so an empty submit reaches our
+    prompt_version: str = Form(""),  # friendly handler instead of a raw FastAPI 422
     db: LinkedInDatabase = Depends(get_db),
 ):
     """Save via the JSON handler (single source of truth), then re-render the
     editor with a status banner. Validation errors keep the submitted text."""
+    # Empty / whitespace-only is rejected here (dashboard-side) so the user sees a
+    # styled message rather than the JSON API's raw 422 — and so a blanks-only
+    # prompt never silently saves (min_length=1 alone would accept "   ").
+    if not prompt_text.strip():
+        status = {"type": "error", "message": "Prompt text cannot be empty."}
+        ctx = _prompt_editor_context(db, status=status, draft_text=prompt_text)
+        return templates.TemplateResponse(request, "_prompt_editor.html", ctx)
     try:
         payload = UpdatePromptRequest(
             prompt_text=prompt_text,
@@ -301,3 +341,31 @@ def run_status_partial(request: Request, run_id: int, db: LinkedInDatabase = Dep
         "notes": rs.notes,
     }
     return templates.TemplateResponse(request, "_run_status.html", ctx)
+
+
+# --------------------------------------------------------------------------
+# Phase 4d — cost summary panel
+# --------------------------------------------------------------------------
+
+@router.get("/dashboard/linkedin/_cost-view", response_class=HTMLResponse)
+def cost_view(request: Request, db: LinkedInDatabase = Depends(get_db)):
+    """Cost panel: reuses the /api/linkedin/cost-summary handler for the totals +
+    by-model breakdown, plus a this-month classified count for the average."""
+    cs = linkedin_cost_summary(db)  # CostSummaryResponse
+
+    classified_this_month = int(_scalar(
+        db,
+        "SELECT COUNT(DISTINCT post_id) FROM linkedin_classification_costs "
+        "WHERE strftime('%Y-%m', classified_at) = strftime('%Y-%m', 'now')",
+    ))
+    avg_cost = (cs.this_month_total_usd / classified_this_month) if classified_this_month else None
+
+    context = {
+        "this_month_total": cs.this_month_total_usd,
+        "all_time_total": cs.all_time_total_usd,
+        "post_count": cs.post_count,
+        "by_model": cs.by_model,
+        "classified_this_month": classified_this_month,
+        "avg_cost": avg_cost,
+    }
+    return templates.TemplateResponse(request, "_cost_view.html", context)
