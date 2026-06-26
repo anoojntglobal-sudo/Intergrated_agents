@@ -1,0 +1,46 @@
+{# Posts table partial — rendered server-side, swapped into #posts-table-area by HTMX. #}
+<div class="table-scroll">
+  <table class="posts-table">
+    <thead>
+      <tr>
+        <th>Tier</th>
+        <th>Matched keyword</th>
+        <th>Author</th>
+        <th>Headline</th>
+        <th>Post preview</th>
+        <th>Engagement</th>
+        <th>Commercial fit</th>
+        <th>Relationship value</th>
+        <th>Noise flags</th>
+        <th>Reason</th>
+        <th>Posted at</th>
+        <th>Link</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for post in posts %}
+      <tr class="tier-{{ post.classification.tier | lower if post.classification else 'unclassified' }}">
+        <td>{{ post.classification.tier if post.classification else 'UNCLASSIFIED' }}</td>
+        <td>{{ post.matched_keyword }}</td>
+        <td>{{ post.author_name }}</td>
+        <td>{{ post.author_headline | truncate(80) }}</td>
+        <td class="preview">{{ post.text | truncate(200) }}</td>
+        <td class="num">&#9829; {{ post.like_count }} &middot; &#128172; {{ post.comment_count }} &middot; &#8635; {{ post.repost_count }}</td>
+        <td class="num">{{ post.classification.commercial_fit if post.classification else '—' }}</td>
+        <td class="num">{{ post.classification.relationship_value if post.classification else '—' }}</td>
+        <td>{{ post.classification.noise_flags | join(', ') if post.classification else '—' }}</td>
+        <td class="reason">{{ post.classification.one_line_reason | truncate(120) if post.classification else '—' }}</td>
+        <td>{{ post.posted_at_display }}</td>
+        <td>{% if post.post_url %}<a href="{{ post.post_url }}" target="_blank" rel="noopener">&#8599;</a>{% else %}—{% endif %}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="12" class="empty">No posts match the current filters.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="pagination">
+  <span>Showing {{ (offset + 1) if posts else 0 }}&ndash;{{ offset + posts|length }} of {{ total }}</span>
+  {# Pagination controls arrive in Phase 4c — counts only for now. #}
+</div>
