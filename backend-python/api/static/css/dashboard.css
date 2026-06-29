@@ -534,3 +534,27 @@ body { padding: 0; }
 @media (max-width: 768px) {
   .x-dist { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* X prompt editor — version history list (Sub-phase X3; new UI, minimal rules) */
+.prompt-history { margin-top: var(--space); }
+.prompt-history ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.prompt-history li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.8rem;
+}
+.ph-version {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.ph-active {
+  color: var(--color-tier-1);
+  background: var(--color-tier-1-bg);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}

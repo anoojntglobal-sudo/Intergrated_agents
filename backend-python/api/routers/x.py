@@ -11,11 +11,19 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from agents.brand_visibility.x.db import Database
 
 router = APIRouter()
+
+
+class UpdatePromptRequest(BaseModel):
+    """Body for POST /api/x/active-prompt. Length bounds match the DB validation;
+    whitespace-only content is rejected by db.set_active_prompt (-> 422)."""
+    prompt_text: str = Field(min_length=1, max_length=50_000)
+    prompt_version: str = Field(min_length=1, max_length=64)
 
 
 def get_x_db() -> Database:
@@ -58,3 +66,14 @@ def cost_summary(db: Database = Depends(get_x_db)) -> dict:
 @router.get("/active-prompt")
 def active_prompt(db: Database = Depends(get_x_db)) -> dict:
     return db.get_active_prompt()
+
+
+@router.post("/active-prompt")
+def update_active_prompt(payload: UpdatePromptRequest, db: Database = Depends(get_x_db)) -> dict:
+    """Save a new active prompt version (Sub-phase X3). Mirrors LinkedIn's
+    POST /api/linkedin/active-prompt: deactivates the current active row and
+    inserts a new active version. Returns the new row."""
+    try:
+        return db.set_active_prompt(payload.prompt_version, payload.prompt_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))

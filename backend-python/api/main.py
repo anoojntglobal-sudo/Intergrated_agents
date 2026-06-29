@@ -48,16 +48,18 @@ async def lifespan(app: FastAPI):
         pass
     logger.info("Schema initialization complete")
 
-    # Verify X (KA017) Turso connectivity at startup. The X tables already exist
-    # in Turso, so skip schema init here — this is a connectivity probe only.
+    # Initialize X (KA017) schema ONCE at startup (skip_schema_init=False). This
+    # creates x_active_prompt and runs the one-time file->DB prompt migration
+    # (Sub-phase X3); existing X tables use CREATE/ALTER IF NOT EXISTS, so they
+    # are untouched. Request handlers use XDatabase(skip_schema_init=True).
     try:
-        xdb = XDatabase(skip_schema_init=True)
-        logger.info("X DB connectivity OK (scraped_tweets: %s rows)", xdb.count_posts())
+        xdb = XDatabase()  # default skip_schema_init=False -> runs DDL + migration once
+        logger.info("X DB init OK (scraped_tweets: %s rows)", xdb.count_posts())
         xconn = getattr(xdb, "_conn_obj", None)
         if xconn is not None and hasattr(xconn, "close"):
             xconn.close()
     except Exception:
-        logger.exception("X DB connectivity check FAILED (dashboard /dashboard/x may error)")
+        logger.exception("X DB init/connectivity check FAILED (dashboard /dashboard/x may error)")
 
     yield
     logger.info("API shutdown complete")

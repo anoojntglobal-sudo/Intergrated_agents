@@ -179,6 +179,7 @@ class Database:
             self._migrate_useful_promoters()
             self._migrate_author_reputation()
             self._migrate_classification_costs()
+            self._migrate_active_prompt()
 
     def _init_schema(self) -> None:
         for stmt in SCHEMA_STATEMENTS:
@@ -289,6 +290,46 @@ class Database:
                 logger.warning("classification_costs migration statement failed (may already exist): %s", exc)
         self._conn_obj.commit()
         logger.info("classification_costs table ready")
+
+    def _migrate_active_prompt(self) -> None:
+        """Create x_active_prompt (versioned, multi-row history) and, on the FIRST
+        run only, seed v1 from the file-based prompt (config/prompts/active.txt).
+        Idempotent: re-runs are no-ops once a row exists. The file is kept on disk
+        as a fallback + git-tracked reference (Sub-phase X3)."""
+        statements = [
+            """CREATE TABLE IF NOT EXISTS x_active_prompt (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL,
+                content TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_x_active_prompt_active ON x_active_prompt(is_active)",
+        ]
+        for stmt in statements:
+            try:
+                self._conn_obj.execute(stmt)
+            except Exception as exc:
+                logger.warning("x_active_prompt migration statement failed (may already exist): %s", exc)
+        self._conn_obj.commit()
+
+        # One-time seed from the file prompt (only when the table is empty).
+        try:
+            count = self.query("SELECT COUNT(*) AS c FROM x_active_prompt")[0]["c"]
+        except Exception:
+            count = 1  # be conservative — never double-seed if the count read fails
+        if count == 0:
+            content = (self._file_prompt().get("content") or "")
+            if content.strip():
+                with self._conn() as conn:
+                    conn.execute(
+                        "INSERT INTO x_active_prompt (version, content, is_active, created_at) "
+                        "VALUES ('v1', ?, 1, ?)",
+                        (content, self._now()),
+                    )
+                logger.info("Migrated X prompt v1 from file to DB (%d chars)", len(content))
+            else:
+                logger.warning("Skipped X prompt migration: file prompt empty/missing")
 
     # Allowed enum values for useful_promoters
     _PROMOTION_KINDS = {"vendor", "self", "agency", "course", "vc_portfolio"}
@@ -1067,10 +1108,10 @@ class Database:
             "by_model": by_model,
         }
 
-    def get_active_prompt(self) -> dict:
-        """Read the file-based active prompt: config/prompts/active.txt holds the
-        filename (no extension) of the live prompt. File-based for now; DB-backed
-        prompts are Sub-phase X3."""
+    def _file_prompt(self) -> dict:
+        """Read the file-based prompt (config/prompts/active.txt -> <name>.txt).
+        Kept as the fallback source after the X3 DB migration. Returns
+        {filename, content, updated_at(mtime)}."""
         from pathlib import Path
         prompts_dir = Path(__file__).resolve().parents[3] / "config" / "prompts"
         try:
@@ -1089,6 +1130,69 @@ class Database:
             except Exception:
                 pass
         return {"filename": filename, "content": content, "updated_at": updated_at}
+
+    def get_active_prompt(self) -> dict:
+        """Active classifier prompt (Sub-phase X3: DB-first, file fallback).
+
+        Returns {version, content, updated_at}. Primary source is the
+        x_active_prompt row with is_active=1; if that table/row is missing
+        (shouldn't happen post-migration), falls back to the file prompt with
+        version='file'. Never returns None — callers (classifier, API) rely on
+        a content string being present."""
+        try:
+            rows = self.query(
+                "SELECT version, content, created_at FROM x_active_prompt "
+                "WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
+            )
+        except Exception as exc:
+            logger.warning("x_active_prompt read failed (%s); falling back to file prompt", exc)
+            rows = []
+        if rows:
+            r = rows[0]
+            return {"version": r["version"], "content": r["content"], "updated_at": r["created_at"]}
+        logger.warning("No active x_active_prompt row; falling back to file prompt")
+        f = self._file_prompt()
+        return {"version": "file", "content": f["content"], "updated_at": f["updated_at"]}
+
+    def set_active_prompt(self, version: str, content: str) -> dict:
+        """Save a new active prompt version (Sub-phase X3). Deactivates the
+        current active row and inserts a new is_active=1 row (immutable history;
+        matches LinkedIn's "save creates a new active version" semantics).
+        Raises ValueError on invalid input. Returns the new row as a dict."""
+        version = (version or "").strip()
+        content = content if content is not None else ""
+        if not version:
+            raise ValueError("version must be non-empty")
+        if len(version) > 64:
+            raise ValueError("version too long (max 64 characters)")
+        if not content.strip():
+            raise ValueError("content must be non-empty")
+        if len(content) > 50_000:
+            raise ValueError("content too long (max 50000 characters)")
+
+        with self._conn() as conn:
+            conn.execute("UPDATE x_active_prompt SET is_active = 0 WHERE is_active = 1")
+            cur = conn.execute(
+                "INSERT INTO x_active_prompt (version, content, is_active, created_at) "
+                "VALUES (?, ?, 1, ?)",
+                (version, content, self._now()),
+            )
+            new_id = cur.lastrowid
+        rows = self.query(
+            "SELECT id, version, content, is_active, created_at FROM x_active_prompt WHERE id = ?",
+            (new_id,),
+        )
+        return rows[0] if rows else {}
+
+    def list_prompt_versions(self) -> list[dict]:
+        """Version history metadata (no content) for the editor — newest first."""
+        try:
+            return self.query(
+                "SELECT id, version, is_active, created_at FROM x_active_prompt "
+                "ORDER BY id DESC LIMIT 20"
+            )
+        except Exception:
+            return []
 
     # ------------------------------------------------------------------
     # User ID cache (handle → Twitter numeric user_id)

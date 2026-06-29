@@ -522,3 +522,62 @@ def x_cost_view(request: Request, db: XDatabase = Depends(get_x_db)):
         "avg_cost": avg_cost,
     }
     return templates.TemplateResponse(request, "_x_cost_view.html", context)
+
+
+def _x_next_version(db: XDatabase) -> str:
+    """Suggest the next version label: bump a 'vN' active version, else 'v<count+1>'."""
+    import re
+    cur = db.get_active_prompt() or {}
+    m = re.match(r"^v(\d+)$", str(cur.get("version") or ""))
+    if m:
+        return f"v{int(m.group(1)) + 1}"
+    return f"v{len(db.list_prompt_versions()) + 1}"
+
+
+def _x_prompt_editor_context(db: XDatabase, status: Optional[dict] = None,
+                            draft_text: Optional[str] = None) -> dict:
+    """Context for the X prompt editor. draft_text repopulates the textarea after
+    a failed save so the user doesn't lose their edit."""
+    cur = db.get_active_prompt() or {}
+    versions = db.list_prompt_versions()
+    return {
+        "prompt_version": cur.get("version"),
+        "prompt_text": draft_text if draft_text is not None else (cur.get("content") or ""),
+        "updated_display": _fmt_ts(cur.get("updated_at")),
+        "next_version": _x_next_version(db),
+        "max_chars": 50_000,
+        "status": status,
+        "versions": [{**v, "created_display": _fmt_ts(v.get("created_at"))} for v in versions],
+    }
+
+
+@router.get("/dashboard/x/_prompt-editor", response_class=HTMLResponse)
+def x_prompt_editor(request: Request, db: XDatabase = Depends(get_x_db)):
+    return templates.TemplateResponse(request, "_x_prompt_editor.html", _x_prompt_editor_context(db))
+
+
+@router.post("/dashboard/x/_prompt-editor", response_class=HTMLResponse)
+def x_prompt_editor_save(
+    request: Request,
+    prompt_text: str = Form(...),
+    prompt_version: str = Form(""),
+    db: XDatabase = Depends(get_x_db),
+):
+    """Save via db.set_active_prompt (single source of truth), then re-render the
+    editor with a status banner. Mirrors LinkedIn's guards: empty text -> error;
+    blank version -> auto-generate. Validation errors keep the submitted text."""
+    if not prompt_text.strip():
+        status = {"type": "error", "message": "Prompt text cannot be empty."}
+        ctx = _x_prompt_editor_context(db, status=status, draft_text=prompt_text)
+        return templates.TemplateResponse(request, "_x_prompt_editor.html", ctx)
+
+    version = prompt_version.strip() or _x_next_version(db)  # blank -> auto-increment
+    try:
+        row = db.set_active_prompt(version, prompt_text)
+    except ValueError as exc:
+        status = {"type": "error", "message": f"Invalid: {exc}"}
+        ctx = _x_prompt_editor_context(db, status=status, draft_text=prompt_text)
+        return templates.TemplateResponse(request, "_x_prompt_editor.html", ctx)
+
+    status = {"type": "success", "message": f"Saved as {row.get('version')}."}
+    return templates.TemplateResponse(request, "_x_prompt_editor.html", _x_prompt_editor_context(db, status=status))

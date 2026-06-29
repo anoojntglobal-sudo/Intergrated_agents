@@ -99,6 +99,13 @@
         <p class="loading">Loading cost summary…</p>
       </div>
     </details>
+    <details class="control-panel">
+      <summary>Classifier prompt</summary>
+      <div hx-get="/dashboard/x/_prompt-editor"
+           hx-trigger="toggle from:closest details" hx-swap="innerHTML">
+        <p class="loading">Loading prompt editor…</p>
+      </div>
+    </details>
   </section>
 
   <footer class="site-footer">
