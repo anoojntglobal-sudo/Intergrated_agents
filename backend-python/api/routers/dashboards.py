@@ -18,7 +18,7 @@ assorted polish. Still no new JSON API endpoints — cost data reuses the Phase 
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from typing import Optional
@@ -29,6 +29,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
 from agents.brand_visibility.linkedin.db import LinkedInDatabase
+from agents.brand_visibility.x.db import Database as XDatabase
+from api.routers.x import get_x_db
 from api.routers.linkedin import (
     MONTHLY_BUDGET,
     PostSort,
@@ -369,3 +371,127 @@ def cost_view(request: Request, db: LinkedInDatabase = Depends(get_db)):
         "avg_cost": avg_cost,
     }
     return templates.TemplateResponse(request, "_cost_view.html", context)
+
+
+# ==========================================================================
+# X (KA017) dashboard — Sub-phase X1 (read-only): KPI strip, posts table,
+# filters, pagination. Mirrors the LinkedIn dashboard endpoints but lives
+# alongside them; no writes/schedule/prompt/run-now in this sub-phase.
+# ==========================================================================
+
+# The sidebar "Other" checkbox collapses the rare classes into one filter value.
+X_CLASS_OTHER = ["H", "I", "J", "K", "GOVT_PROMOTION"]
+
+
+def _rel_time(ts) -> str:
+    """Compact relative time, e.g. 'just now', '5m ago', '2h ago', '3d ago';
+    falls back to an absolute date beyond ~30 days."""
+    if not ts:
+        return "—"
+    try:
+        d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        secs = (datetime.now(timezone.utc) - d).total_seconds()
+        if secs < 60:
+            return "just now"
+        if secs < 3600:
+            return f"{int(secs // 60)}m ago"
+        if secs < 86_400:
+            return f"{int(secs // 3600)}h ago"
+        if secs < 2_592_000:
+            return f"{int(secs // 86_400)}d ago"
+        return d.strftime("%b %d, %Y")
+    except Exception:
+        return str(ts)
+
+
+def _compact(n) -> str:
+    """Compact engagement count: 1234 -> '1.2k', 2_500_000 -> '2.5M'."""
+    try:
+        n = int(n or 0)
+    except Exception:
+        return "0"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _x_kpi_context(db: XDatabase) -> dict:
+    """Context for the X KPI strip — shared by first paint (include) and the
+    standalone /dashboard/x/_kpi-strip refresh endpoint."""
+    s = db.kpi_stats()
+    bc = s["by_class"]
+    shown = {k: bc.get(k, 0) for k in ("A", "B", "C", "F")}
+    pct = round(100 * s["classified"] / s["total_posts"]) if s["total_posts"] else 0
+    return {
+        "kpi": s,
+        "last_scraped_display": _fmt_ts(s["last_scraped_at"]),
+        "classified_pct": pct,
+        "dist": {**shown, "OTHER": max(0, s["classified"] - sum(shown.values()))},
+    }
+
+
+@router.get("/dashboard/x", response_class=HTMLResponse)
+def x_dashboard(
+    request: Request,
+    embedded: bool = Query(False),
+    db: XDatabase = Depends(get_x_db),
+):
+    context = {**_x_kpi_context(db), "embedded": embedded}
+    return templates.TemplateResponse(request, "x_dashboard.html", context)
+
+
+@router.get("/dashboard/x/_kpi-strip", response_class=HTMLResponse)
+def x_kpi_strip(request: Request, db: XDatabase = Depends(get_x_db)):
+    return templates.TemplateResponse(request, "_x_kpi_strip.html", _x_kpi_context(db))
+
+
+@router.get("/dashboard/x/_posts-table", response_class=HTMLResponse)
+def x_posts_table(
+    request: Request,
+    db: XDatabase = Depends(get_x_db),
+    cls: Optional[list[str]] = Query(None, alias="class"),
+    search: Optional[str] = Query(None),
+    sort_by: str = Query("priority_then_quality"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """HTML partial (tweets table + pagination). Expands the 'OTHER' checkbox
+    into the rare classes, then reuses Database.list_posts (single source of
+    truth). Empty class selection -> no class filter (shows all)."""
+    expanded: list[str] = []
+    for c in (cls or []):
+        expanded.extend(X_CLASS_OTHER if c == "OTHER" else [c])
+    class_filter = expanded or None
+
+    rows = db.list_posts(
+        class_filter=class_filter, search=search or None,
+        offset=offset, limit=limit, sort_by=sort_by,
+    )
+    total = db.count_posts_filtered(class_filter=class_filter, search=search or None)
+
+    for r in rows:
+        r["posted_display"] = _rel_time(r.get("posted_at"))
+        r["engagement_display"] = _compact(r.get("engagement"))
+        handle, tid = r.get("author_handle"), r.get("tweet_id")
+        r["tweet_url"] = f"https://x.com/{handle}/status/{tid}" if handle and tid else None
+
+    page_start = (offset + 1) if rows else 0
+    page_end = offset + len(rows)
+    context = {
+        "posts": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "page_start": page_start,
+        "page_end": page_end,
+        "prev_offset": max(0, offset - limit),
+        "next_offset": offset + limit,
+        "has_prev": offset > 0,
+        "has_next": (offset + limit) < total,
+        "page_sizes": PAGE_SIZES,
+    }
+    return templates.TemplateResponse(request, "_x_posts_table.html", context)

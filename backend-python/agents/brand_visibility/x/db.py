@@ -152,8 +152,14 @@ def _row_to_dict(row, columns: list[str]) -> dict:
 class Database:
     """Turso-backed data access via the libsql embedded-replica driver."""
 
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(self, db_path: str | None = None, skip_schema_init: bool = False) -> None:
         # db_path kept for backward compatibility — ignored, we use Turso.
+        #
+        # skip_schema_init: when True, connect + sync only — skip all CREATE/ALTER
+        # DDL and migrations. Used by the read-only FastAPI dependency (api/routers/x.py)
+        # so dashboard requests don't replay schema DDL (and its commits) on every
+        # call. Default False preserves existing behavior for the orchestrator,
+        # classifier, scraper, scripts, and Streamlit dashboard.
         if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
             raise RuntimeError(
                 "TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be set in .env. "
@@ -167,11 +173,12 @@ class Database:
             sync_interval=TURSO_SYNC_INTERVAL,
         )
         self._conn_obj.sync()
-        self._init_schema()
-        self._migrate_columns()
-        self._migrate_useful_promoters()
-        self._migrate_author_reputation()
-        self._migrate_classification_costs()
+        if not skip_schema_init:
+            self._init_schema()
+            self._migrate_columns()
+            self._migrate_useful_promoters()
+            self._migrate_author_reputation()
+            self._migrate_classification_costs()
 
     def _init_schema(self) -> None:
         for stmt in SCHEMA_STATEMENTS:
@@ -891,6 +898,197 @@ class Database:
             cur = conn.execute(sql, params)
             cols = [d[0] for d in cur.description] if cur.description else []
             return [_row_to_dict(row, cols) for row in cur.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Read helpers for the FastAPI dashboard (Sub-phase X1, read-only)
+    #
+    # Schema reminders (the contract field names differ from the real columns,
+    # so these methods map):
+    #   scraped_tweets: text=content, created_at=posted_at, confirmed_class=class,
+    #     priority_flag is a TEXT enum (URGENT_*/STANDARD/LOW_PRIORITY_CONTENT),
+    #     author_reputation_label=reputation, no display-name column (handle only).
+    #   agent_runs: ended_at (not finished_at), records_new/records_updated,
+    #     no keywords_queried/posts_classified columns (parsed from summary_json).
+    #   llm_costs: estimated_cost_usd (the cost column), called_at.
+    # ------------------------------------------------------------------
+
+    # Sort keys -> safe ORDER BY (whitelist; never interpolate user input). SQLite
+    # sorts NULLs last under DESC, so unscored/unclassified rows fall to the end.
+    _POSTS_ORDER = {
+        "posted_desc": "created_at DESC",
+        "priority_then_quality": (
+            "CASE WHEN priority_flag LIKE 'URGENT%' THEN 0 ELSE 1 END, "
+            "quality_score DESC, created_at DESC"
+        ),
+        "recent_classifications": "classified_at DESC",
+    }
+
+    @staticmethod
+    def _posts_where(class_filter: list[str] | None, search: str | None):
+        """Build the shared WHERE clause for list_posts/count (parameterized)."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if class_filter:
+            clauses.append(f"confirmed_class IN ({', '.join('?' for _ in class_filter)})")
+            params.extend(class_filter)
+        if search:
+            clauses.append("(text LIKE ? OR author_handle LIKE ?)")
+            like = f"%{search}%"
+            params.extend([like, like])
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where, params
+
+    def count_posts(self) -> int:
+        """Total scraped_tweets rows."""
+        rows = self.query("SELECT COUNT(*) AS c FROM scraped_tweets")
+        return rows[0]["c"] if rows else 0
+
+    def count_posts_filtered(self, class_filter: list[str] | None = None,
+                             search: str | None = None) -> int:
+        """Row count under the same filters as list_posts — drives pagination."""
+        where, params = self._posts_where(class_filter, search)
+        rows = self.query(f"SELECT COUNT(*) AS c FROM scraped_tweets{where}", tuple(params))
+        return rows[0]["c"] if rows else 0
+
+    def kpi_stats(self) -> dict:
+        """Top-of-dashboard metrics. by_class maps confirmed_class -> count;
+        high_priority counts URGENT_* tweets (priority_flag is a TEXT enum)."""
+        total = self.count_posts()
+        classified = self.query(
+            "SELECT COUNT(*) AS c FROM scraped_tweets WHERE confirmed_class IS NOT NULL"
+        )[0]["c"]
+        last = self.query("SELECT MAX(ingested_at) AS m FROM scraped_tweets")[0]["m"]
+        high_priority = self.query(
+            "SELECT COUNT(*) AS c FROM scraped_tweets WHERE priority_flag LIKE 'URGENT%'"
+        )[0]["c"]
+        by_class = {
+            r["k"]: r["c"]
+            for r in self.query(
+                "SELECT confirmed_class AS k, COUNT(*) AS c FROM scraped_tweets "
+                "WHERE confirmed_class IS NOT NULL GROUP BY confirmed_class"
+            )
+        }
+        return {
+            "total_posts": total,
+            "classified": classified,
+            "unclassified": total - classified,
+            "last_scraped_at": last,
+            "high_priority": high_priority,
+            "by_class": by_class,
+        }
+
+    def list_posts(self, class_filter: list[str] | None = None, search: str | None = None,
+                   offset: int = 0, limit: int = 50,
+                   sort_by: str = "priority_then_quality") -> list[dict]:
+        """One page of tweets as dashboard-ready dicts. engagement is computed
+        (likes+RTs+replies). author_name is None — scraped_tweets stores only the
+        handle. reputation comes from the author_reputation_label overlay column."""
+        where, params = self._posts_where(class_filter, search)
+        order = self._POSTS_ORDER.get(sort_by, self._POSTS_ORDER["priority_then_quality"])
+        sql = (
+            "SELECT tweet_id, author_handle, text, created_at, confirmed_class, "
+            "priority_flag, quality_score, velocity, is_builder, author_reputation_label, "
+            "(COALESCE(like_count,0) + COALESCE(retweet_count,0) + COALESCE(reply_count,0)) "
+            "AS engagement "
+            f"FROM scraped_tweets{where} ORDER BY {order} LIMIT ? OFFSET ?"
+        )
+        rows = self.query(sql, tuple(params + [limit, offset]))
+        out = []
+        for r in rows:
+            out.append({
+                "tweet_id": r["tweet_id"],
+                "author_handle": r["author_handle"],
+                "author_name": None,  # no display-name column in scraped_tweets
+                "content": r["text"],
+                "posted_at": r["created_at"],
+                "classification": r["confirmed_class"],
+                "priority_flag": r["priority_flag"],
+                "quality_score": r["quality_score"],
+                "velocity": r["velocity"],
+                "is_builder": bool(r["is_builder"]) if r["is_builder"] is not None else None,
+                "reputation": r["author_reputation_label"],
+                "engagement": r["engagement"] or 0,
+            })
+        return out
+
+    def get_recent_runs(self, limit: int = 20) -> list[dict]:
+        """Latest agent_runs, mapped to the dashboard contract. The real table
+        has ended_at/records_new/records_updated and no keywords_queried/
+        posts_classified columns, so the latter come from summary_json if present."""
+        rows = self.query(
+            "SELECT id, started_at, ended_at, status, triggered_by, calls_used, "
+            "records_new, records_updated, error_message, summary_json "
+            "FROM agent_runs ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        )
+        out = []
+        for r in rows:
+            summary = {}
+            if r.get("summary_json"):
+                try:
+                    summary = json.loads(r["summary_json"])
+                except Exception:
+                    summary = {}
+            out.append({
+                "id": r["id"],
+                "started_at": r["started_at"],
+                "finished_at": r["ended_at"],
+                "status": r["status"],
+                "triggered_by": r["triggered_by"],
+                "keywords_queried": summary.get("keywords_queried"),
+                "posts_fetched": r["records_new"],
+                "posts_classified": summary.get("posts_classified", r["records_updated"]),
+                "error_message": r["error_message"],
+            })
+        return out
+
+    def cost_summary(self) -> dict:
+        """LLM spend from llm_costs (cost column = estimated_cost_usd)."""
+        total_all = self.query(
+            "SELECT COALESCE(SUM(estimated_cost_usd), 0) AS s FROM llm_costs"
+        )[0]["s"]
+        total_month = self.query(
+            "SELECT COALESCE(SUM(estimated_cost_usd), 0) AS s FROM llm_costs "
+            "WHERE strftime('%Y-%m', called_at) = strftime('%Y-%m', 'now')"
+        )[0]["s"]
+        rows_count = self.query("SELECT COUNT(*) AS c FROM llm_costs")[0]["c"]
+        by_model = [
+            {"model": r["model"], "posts": r["c"],
+             "total_cost_usd": round(float(r["s"]), 6)}
+            for r in self.query(
+                "SELECT model, COUNT(*) AS c, COALESCE(SUM(estimated_cost_usd), 0) AS s "
+                "FROM llm_costs GROUP BY model ORDER BY s DESC"
+            )
+        ]
+        return {
+            "total_all_time_usd": round(float(total_all), 6),
+            "total_this_month_usd": round(float(total_month), 6),
+            "posts_classified": rows_count,  # count of llm_costs rows (all purposes)
+            "by_model": by_model,
+        }
+
+    def get_active_prompt(self) -> dict:
+        """Read the file-based active prompt: config/prompts/active.txt holds the
+        filename (no extension) of the live prompt. File-based for now; DB-backed
+        prompts are Sub-phase X3."""
+        from pathlib import Path
+        prompts_dir = Path(__file__).resolve().parents[3] / "config" / "prompts"
+        try:
+            name = (prompts_dir / "active.txt").read_text(encoding="utf-8").strip()
+        except Exception:
+            name = ""
+        filename = name if name.endswith(".txt") else (f"{name}.txt" if name else "")
+        content, updated_at = "", None
+        if filename:
+            fpath = prompts_dir / filename
+            try:
+                content = fpath.read_text(encoding="utf-8")
+                updated_at = datetime.fromtimestamp(
+                    fpath.stat().st_mtime, tz=timezone.utc
+                ).isoformat()
+            except Exception:
+                pass
+        return {"filename": filename, "content": content, "updated_at": updated_at}
 
     # ------------------------------------------------------------------
     # User ID cache (handle → Twitter numeric user_id)

@@ -429,3 +429,108 @@ body { padding: 0; }
   .sidebar { flex: 1 1 auto; width: 100%; }
   .field-row > label:not(.check) { flex-basis: 100%; }
 }
+
+/* ─────────────────────────────────────────────────────────────
+ * X (Twitter) dashboard — Sub-phase X1 (additive; no existing rule changed)
+ * Class-badge palette uses literal hex (the requested A-NOISE colors aren't all
+ * in :root) rather than introducing new CSS variables.
+ * ───────────────────────────────────────────────────────────── */
+
+/* Class-distribution mini-strip (second KPI row, 5 tiles). Reuses .kpi-card /
+   .kpi-tier-* for colour; this just lays them out. */
+.x-dist {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--space);
+  padding: 0 var(--space) var(--space);
+}
+.x-dist-lead .kpi-value { font-size: 1.9rem; }   /* A reads as the lead tile */
+.x-dist-other { border-left: 4px solid var(--color-border); }
+
+/* Class badges (literal hex; light-bg variants get dark text for contrast) */
+.class-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.4;
+  color: #fff;
+  background: #94a3b8;            /* default / unknown class */
+}
+.class-A { background: #3b82f6; }                       /* blue   — engage */
+.class-B { background: #10b981; }                       /* green  — watch  */
+.class-C { background: #f59e0b; color: #1e293b; }       /* yellow — signal */
+.class-D { background: #f97316; }                       /* orange */
+.class-E { background: #8b5cf6; }                       /* purple */
+.class-F { background: #ec4899; }                       /* pink   */
+.class-G { background: #14b8a6; }                       /* teal   */
+.class-NOISE { background: #94a3b8; }                   /* gray   — noise  */
+.class-NONE  { background: #cbd5e1; color: #475569; }   /* light  — unclassified */
+
+/* Priority flag pill (priority_flag is a TEXT enum; we surface URGENT_* only) */
+.priority-flag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+}
+
+/* Quality score: small horizontal bar + number */
+.quality-cell { display: inline-flex; align-items: center; gap: 8px; }
+.quality-bar {
+  display: inline-block;
+  width: 56px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-border);
+  overflow: hidden;
+  vertical-align: middle;
+}
+.quality-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--color-primary);
+}
+
+/* Tweet table odds and ends */
+.x-handle { font-weight: 600; }
+.x-builder {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--color-tier-1);
+  background: var(--color-tier-1-bg);
+}
+.muted { color: var(--color-muted); }
+
+/* Embedded-iframe wrapper for the X dashboard (used by the frontend later;
+   mirrors the LinkedIn iframe wrapper pattern). */
+.x-iframe-wrap {
+  position: relative;
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--color-surface);
+}
+.x-iframe {
+  width: 100%;
+  height: 100%;
+  min-height: 70vh;
+  border: 0;
+  display: block;
+}
+
+@media (max-width: 768px) {
+  .x-dist { grid-template-columns: repeat(2, 1fr); }
+}
