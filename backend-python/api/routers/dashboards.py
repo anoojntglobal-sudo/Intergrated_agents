@@ -581,3 +581,55 @@ def x_prompt_editor_save(
 
     status = {"type": "success", "message": f"Saved as {row.get('version')}."}
     return templates.TemplateResponse(request, "_x_prompt_editor.html", _x_prompt_editor_context(db, status=status))
+
+
+def _x_scheduler_context(db: XDatabase, status: Optional[dict] = None) -> dict:
+    s = db.get_schedule()
+    return {
+        "sched": s,
+        "last_run_display": _fmt_ts(s.get("last_run_at")) if s.get("last_run_at") else None,
+        "last_run_status": s.get("last_run_status"),
+        "status": status,
+    }
+
+
+@router.get("/dashboard/x/_scheduler-form", response_class=HTMLResponse)
+def x_scheduler_form(request: Request, db: XDatabase = Depends(get_x_db)):
+    return templates.TemplateResponse(request, "_x_scheduler_form.html", _x_scheduler_context(db))
+
+
+@router.put("/dashboard/x/_scheduler-form", response_class=HTMLResponse)
+def x_scheduler_form_save(
+    request: Request,
+    mode: str = Form(...),
+    sweep_type: str = Form(...),
+    max_pages: str = Form(...),
+    max_keywords: str = Form(...),
+    class_filter: str = Form(""),
+    since_hours: str = Form(""),
+    max_api_calls: str = Form(...),
+    db: XDatabase = Depends(get_x_db),
+):
+    """Persist sweep config via db.update_schedule. Blank text/since_hours fields
+    mean 'leave unchanged' (matches LinkedIn's semantic). db.update_schedule
+    coerces the string values and validates ranges/enums."""
+    updates: dict = {
+        "mode": mode,
+        "sweep_type": sweep_type,
+        "max_pages": max_pages,
+        "max_keywords": max_keywords,
+        "max_api_calls": max_api_calls,
+    }
+    if class_filter.strip():
+        updates["class_filter"] = class_filter.strip()
+    if since_hours.strip():
+        updates["since_hours"] = since_hours.strip()
+
+    try:
+        db.update_schedule(**updates)
+    except ValueError as exc:
+        status = {"type": "error", "message": f"Invalid: {exc}"}
+        return templates.TemplateResponse(request, "_x_scheduler_form.html", _x_scheduler_context(db, status=status))
+
+    status = {"type": "success", "message": "Schedule saved."}
+    return templates.TemplateResponse(request, "_x_scheduler_form.html", _x_scheduler_context(db, status=status))

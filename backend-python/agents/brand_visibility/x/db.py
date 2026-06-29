@@ -180,6 +180,7 @@ class Database:
             self._migrate_author_reputation()
             self._migrate_classification_costs()
             self._migrate_active_prompt()
+            self._migrate_schedule()
 
     def _init_schema(self) -> None:
         for stmt in SCHEMA_STATEMENTS:
@@ -330,6 +331,46 @@ class Database:
                 logger.info("Migrated X prompt v1 from file to DB (%d chars)", len(content))
             else:
                 logger.warning("Skipped X prompt migration: file prompt empty/missing")
+
+    def _migrate_schedule(self) -> None:
+        """Create x_schedule (single-row sweep config) and seed conservative
+        defaults on first run (Sub-phase X4). Columns mirror the X orchestrator's
+        tunable sweep inputs — NOT LinkedIn's schema. No enabled/interval/
+        next_run_at: cadence is owned by Render Cron, not this table."""
+        stmt = """CREATE TABLE IF NOT EXISTS x_schedule (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            mode TEXT NOT NULL DEFAULT 'all',
+            sweep_type TEXT NOT NULL DEFAULT 'Latest',
+            max_pages INTEGER NOT NULL DEFAULT 1,
+            max_keywords INTEGER NOT NULL DEFAULT 5,
+            class_filter TEXT NOT NULL DEFAULT '',
+            since_hours INTEGER,
+            max_api_calls INTEGER NOT NULL DEFAULT 12,
+            last_run_at TEXT,
+            last_run_status TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )"""
+        try:
+            self._conn_obj.execute(stmt)
+        except Exception as exc:
+            logger.warning("x_schedule migration statement failed (may already exist): %s", exc)
+        self._conn_obj.commit()
+
+        try:
+            count = self.query("SELECT COUNT(*) AS c FROM x_schedule")[0]["c"]
+        except Exception:
+            count = 1  # never double-seed if the count read fails
+        if count == 0:
+            with self._conn() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO x_schedule "
+                    "(id, mode, sweep_type, max_pages, max_keywords, class_filter, "
+                    " since_hours, max_api_calls, updated_at) "
+                    "VALUES (1, 'all', 'Latest', 1, 5, '', NULL, 12, ?)",
+                    (self._now(),),
+                )
+            logger.info("Seeded default X schedule "
+                        "(mode=all, sweep_type=Latest, max_pages=1, max_keywords=5, max_api_calls=12)")
 
     # Allowed enum values for useful_promoters
     _PROMOTION_KINDS = {"vendor", "self", "agency", "course", "vc_portfolio"}
@@ -1193,6 +1234,111 @@ class Database:
             )
         except Exception:
             return []
+
+    # ------------------------------------------------------------------
+    # Sweep schedule config (Sub-phase X4) — single row (id=1). Config-only:
+    # stores the orchestrator's tunable sweep params. Render Cron owns cadence
+    # (no enabled/interval/next_run_at here). Nothing reads this table until X5.
+    # ------------------------------------------------------------------
+
+    # Editable columns (everything else — id/last_run_*/updated_at — is managed).
+    _SCHEDULE_EDITABLE = {
+        "mode", "sweep_type", "max_pages", "max_keywords",
+        "class_filter", "since_hours", "max_api_calls",
+    }
+    _SCHEDULE_MODES = {
+        "keywords", "influencers", "reply_trees", "classify", "cluster", "draft", "all",
+    }
+    _SCHEDULE_SWEEP_TYPES = {"Latest", "Top"}
+    _SCHEDULE_CLASSES = {
+        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "NOISE", "GOVT_PROMOTION",
+    }
+
+    @classmethod
+    def _validate_schedule_field(cls, key: str, value):
+        """Coerce + validate one editable schedule field. Form values arrive as
+        strings, so ints are coerced here. Raises ValueError on bad input."""
+        def _as_int(name, lo, hi):
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} must be an integer")
+            if n < lo or n > hi:
+                raise ValueError(f"{name} must be between {lo} and {hi}")
+            return n
+
+        if key == "mode":
+            v = str(value).strip()
+            if v not in cls._SCHEDULE_MODES:
+                raise ValueError(f"mode must be one of {sorted(cls._SCHEDULE_MODES)}")
+            return v
+        if key == "sweep_type":
+            v = str(value).strip()
+            if v not in cls._SCHEDULE_SWEEP_TYPES:
+                raise ValueError("sweep_type must be 'Latest' or 'Top'")
+            return v
+        if key == "max_pages":
+            return _as_int("max_pages", 1, 10)
+        if key == "max_keywords":
+            return _as_int("max_keywords", 1, 50)
+        if key == "max_api_calls":
+            return _as_int("max_api_calls", 1, 100)
+        if key == "since_hours":
+            if value is None or str(value).strip() == "":
+                return None  # NULL = no time filter
+            return _as_int("since_hours", 1, 720)
+        if key == "class_filter":
+            v = str(value).strip()
+            if v:
+                toks = [t.strip() for t in v.split(",") if t.strip()]
+                bad = [t for t in toks if t not in cls._SCHEDULE_CLASSES]
+                if bad:
+                    raise ValueError(f"class_filter has unknown class code(s): {bad}")
+                v = ",".join(toks)
+            return v
+        raise ValueError(f"unknown/uneditable field: {key}")
+
+    def get_schedule(self) -> dict:
+        """Return the single x_schedule row (id=1). Raises if missing — the
+        migration seeds it, so a missing row signals a real problem."""
+        rows = self.query("SELECT * FROM x_schedule WHERE id = 1")
+        if not rows:
+            raise RuntimeError(
+                "x_schedule row (id=1) is missing — schema migration did not seed it"
+            )
+        return rows[0]
+
+    def update_schedule(self, **kwargs) -> dict:
+        """Partial update of editable schedule fields. Unknown/uneditable field
+        names and invalid values raise ValueError. Only provided fields change;
+        updated_at is bumped. Returns the updated row."""
+        self.get_schedule()  # ensure the row exists (raises clear error if not)
+        set_clauses: list[str] = []
+        params: list[Any] = []
+        for key, raw in kwargs.items():
+            if key not in self._SCHEDULE_EDITABLE:
+                raise ValueError(f"unknown/uneditable field: {key}")
+            set_clauses.append(f"{key} = ?")
+            params.append(self._validate_schedule_field(key, raw))
+        if not set_clauses:
+            return self.get_schedule()
+        set_clauses.append("updated_at = ?")
+        params.extend([self._now(), 1])
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE x_schedule SET {', '.join(set_clauses)} WHERE id = ?",
+                tuple(params),
+            )
+        return self.get_schedule()
+
+    def set_last_run(self, status: str) -> None:
+        """Stamp last_run_at=now and last_run_status. Called by the X5 run-now
+        flow; added now so the contract exists. status is typically 'ok'/'failed'."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE x_schedule SET last_run_at = ?, last_run_status = ? WHERE id = 1",
+                (self._now(), status),
+            )
 
     # ------------------------------------------------------------------
     # User ID cache (handle → Twitter numeric user_id)

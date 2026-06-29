@@ -26,6 +26,19 @@ class UpdatePromptRequest(BaseModel):
     prompt_version: str = Field(min_length=1, max_length=64)
 
 
+class UpdateScheduleRequest(BaseModel):
+    """Body for PUT /api/x/schedule — any subset of editable sweep-config fields.
+    Field-level validation (ranges, enums) lives in db.update_schedule (-> 422).
+    Only fields actually sent are updated (exclude_unset)."""
+    mode: Optional[str] = None
+    sweep_type: Optional[str] = None
+    max_pages: Optional[int] = None
+    max_keywords: Optional[int] = None
+    class_filter: Optional[str] = None
+    since_hours: Optional[int] = None
+    max_api_calls: Optional[int] = None
+
+
 def get_x_db() -> Database:
     """One X Database per request. skip_schema_init=True: the X tables already
     exist in Turso, so dashboard reads never replay schema DDL (mirrors the
@@ -75,5 +88,21 @@ def update_active_prompt(payload: UpdatePromptRequest, db: Database = Depends(ge
     inserts a new active version. Returns the new row."""
     try:
         return db.set_active_prompt(payload.prompt_version, payload.prompt_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/schedule")
+def schedule(db: Database = Depends(get_x_db)) -> dict:
+    return db.get_schedule()
+
+
+@router.put("/schedule")
+def update_schedule(payload: UpdateScheduleRequest, db: Database = Depends(get_x_db)) -> dict:
+    """Partial update of the single-row sweep config (Sub-phase X4). Config-only —
+    Render Cron owns cadence. Only fields present in the body are changed."""
+    fields = payload.model_dump(exclude_unset=True)
+    try:
+        return db.update_schedule(**fields)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

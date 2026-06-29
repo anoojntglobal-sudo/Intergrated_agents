@@ -106,6 +106,13 @@
         <p class="loading">Loading prompt editor…</p>
       </div>
     </details>
+    <details class="control-panel">
+      <summary>Scheduler config</summary>
+      <div hx-get="/dashboard/x/_scheduler-form"
+           hx-trigger="toggle from:closest details" hx-swap="innerHTML">
+        <p class="loading">Loading scheduler…</p>
+      </div>
+    </details>
   </section>
 
   <footer class="site-footer">
