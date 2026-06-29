@@ -40,3 +40,5 @@ env/
 # -- Local DB caches (SQLite/Turso) --
 *.db-wal
 *.db-shm
+*.db
+*.db-info
