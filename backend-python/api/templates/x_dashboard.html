@@ -88,6 +88,19 @@
     </section>
   </main>
 
+  <!-- Controls (Sub-phase X2). One collapsible panel for now; X3/X4/X5 add
+       Prompt / Scheduler / Run-agent panels here. Each lazy-loads its partial
+       the first time its <details> opens (toggle trigger). -->
+  <section class="controls" aria-label="Controls">
+    <details class="control-panel">
+      <summary>Cost summary</summary>
+      <div hx-get="/dashboard/x/_cost-view"
+           hx-trigger="toggle from:closest details" hx-swap="innerHTML">
+        <p class="loading">Loading cost summary…</p>
+      </div>
+    </details>
+  </section>
+
   <footer class="site-footer">
     Total tweets: {{ kpi.total_posts }}
     &nbsp;|&nbsp; Classified: {{ kpi.classified }}

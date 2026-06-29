@@ -495,3 +495,30 @@ def x_posts_table(
         "page_sizes": PAGE_SIZES,
     }
     return templates.TemplateResponse(request, "_x_posts_table.html", context)
+
+
+@router.get("/dashboard/x/_cost-view", response_class=HTMLResponse)
+def x_cost_view(request: Request, db: XDatabase = Depends(get_x_db)):
+    """X cost panel (Sub-phase X2). Reuses Database.cost_summary() for totals +
+    by-model breakdown, plus a this-month classification count (rows in llm_costs
+    this month) for the average. The X cost column is estimated_cost_usd."""
+    cs = db.cost_summary()  # {total_all_time_usd, total_this_month_usd, posts_classified, by_model}
+
+    classifications_this_month = db.query(
+        "SELECT COUNT(*) AS c FROM llm_costs "
+        "WHERE strftime('%Y-%m', called_at) = strftime('%Y-%m', 'now')"
+    )[0]["c"]
+    avg_cost = (
+        cs["total_this_month_usd"] / classifications_this_month
+        if classifications_this_month else None
+    )
+
+    context = {
+        "this_month_total": cs["total_this_month_usd"],
+        "all_time_total": cs["total_all_time_usd"],
+        "posts_classified": cs["posts_classified"],
+        "by_model": cs["by_model"],
+        "classifications_this_month": classifications_this_month,
+        "avg_cost": avg_cost,
+    }
+    return templates.TemplateResponse(request, "_x_cost_view.html", context)
