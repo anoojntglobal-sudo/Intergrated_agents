@@ -9,14 +9,57 @@ dashboard partials also consume.
 """
 from __future__ import annotations
 
+import logging
+import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from agents.brand_visibility.x.db import Database
 
 router = APIRouter()
+
+logger = logging.getLogger("uvicorn.error")
+
+# Monthly RapidAPI scrape-call cap for run-now's budget guard. Default 5000
+# (twitter-api45 paid-plan capacity). Override via env if the plan changes.
+X_MONTHLY_API_BUDGET = int(os.getenv("X_MONTHLY_API_BUDGET", "5000"))
+
+
+def _run_sweep_task(run_id: int, config: dict) -> None:
+    """Background worker for run-now. Owns a dedicated Database with
+    sync_interval=None (WAL safety: no background sync mid-write). post_enabled is
+    hardcoded False — the API never drafts/posts. Flushes to remote Turso with an
+    explicit sync() in finally, since background sync is disabled."""
+    from agents.brand_visibility.x.db import Database
+    from agents.brand_visibility.x.orchestrator import run_sweep
+
+    task_db = Database(sync_interval=None, skip_schema_init=True)
+    try:
+        stats = run_sweep(task_db, run_id, config, post_enabled=False)
+        task_db.finish_run(
+            run_id, status=stats["status"],
+            calls_used=stats["api_calls_used"],
+            records_new=stats["posts_fetched"],
+            records_updated=stats["posts_classified"],
+            summary=stats["summary"],
+        )
+        task_db.set_last_run("ok")
+        logger.info("run-now %s %s", run_id, stats["status"])
+    except Exception as exc:
+        logger.exception("run-now %s failed", run_id)
+        try:
+            task_db.finish_run(run_id, status="failed", error_message=str(exc),
+                               summary={"error": str(exc)})
+            task_db.set_last_run("failed")
+        except Exception:
+            logger.exception("run-now %s: could not record failure", run_id)
+    finally:
+        try:
+            task_db.sync()  # explicit flush — sync_interval=None disables auto-sync
+        except Exception:
+            logger.exception("run-now %s: final Turso sync failed", run_id)
 
 
 class UpdatePromptRequest(BaseModel):
@@ -106,3 +149,44 @@ def update_schedule(payload: UpdateScheduleRequest, db: Database = Depends(get_x
         return db.update_schedule(**fields)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/run-now", status_code=202)
+def run_now(background_tasks: BackgroundTasks, db: Database = Depends(get_x_db)) -> dict:
+    """Trigger a sweep with the current schedule config (Sub-phase X5).
+    Scrape+classify ONLY (post_enabled is never True). Guards:
+      409 if a run is already 'running'; 429 if this run could exceed the monthly
+    scrape-call budget. Returns 202 + run_id; work happens in a background task."""
+    existing = db.get_running_run()
+    if existing:
+        raise HTTPException(status_code=409, detail={
+            "reason": "already_running",
+            "run_id": existing["id"],
+            "started_at": existing["started_at"],
+        })
+
+    schedule = db.get_schedule()
+    this_month_calls = db.api_calls_this_month()
+    requested = int(schedule.get("max_api_calls") or 0)
+    if this_month_calls + requested > X_MONTHLY_API_BUDGET:
+        raise HTTPException(status_code=429, detail={
+            "reason": "budget_would_exceed",
+            "current_calls": this_month_calls,
+            "requested_max": requested,
+            "monthly_budget": X_MONTHLY_API_BUDGET,
+        })
+
+    run_id = db.start_run(mode=schedule.get("mode") or "all", triggered_by="dashboard")
+    db.sync()  # push the new 'running' row so the bg task + pollers see it immediately
+    background_tasks.add_task(_run_sweep_task, run_id, dict(schedule))
+    logger.info("run-now accepted: run_id=%s mode=%s budget=%s",
+                run_id, schedule.get("mode"), requested)
+    return {"run_id": run_id, "status": "started"}
+
+
+@router.get("/run-status/{run_id}")
+def run_status(run_id: int, db: Database = Depends(get_x_db)) -> dict:
+    run = db.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+    return run

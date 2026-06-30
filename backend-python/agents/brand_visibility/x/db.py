@@ -152,7 +152,8 @@ def _row_to_dict(row, columns: list[str]) -> dict:
 class Database:
     """Turso-backed data access via the libsql embedded-replica driver."""
 
-    def __init__(self, db_path: str | None = None, skip_schema_init: bool = False) -> None:
+    def __init__(self, db_path: str | None = None, skip_schema_init: bool = False,
+                 sync_interval: int | None = TURSO_SYNC_INTERVAL) -> None:
         # db_path kept for backward compatibility — ignored, we use Turso.
         #
         # skip_schema_init: when True, connect + sync only — skip all CREATE/ALTER
@@ -160,6 +161,12 @@ class Database:
         # so dashboard requests don't replay schema DDL (and its commits) on every
         # call. Default False preserves existing behavior for the orchestrator,
         # classifier, scraper, scripts, and Streamlit dashboard.
+        #
+        # sync_interval: seconds between background replica syncs. Default keeps the
+        # existing behavior. Pass None to DISABLE background sync — required for
+        # write-heavy work like the X5 run-now background task, where a background
+        # sync firing mid-write can trigger a libsql WAL conflict. With None, the
+        # caller MUST call .sync() explicitly to flush writes to remote Turso.
         if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
             raise RuntimeError(
                 "TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be set in .env. "
@@ -170,7 +177,7 @@ class Database:
             self.replica_path,
             TURSO_DATABASE_URL,
             TURSO_AUTH_TOKEN,
-            sync_interval=TURSO_SYNC_INTERVAL,
+            sync_interval=sync_interval,
         )
         self._conn_obj.sync()
         if not skip_schema_init:
@@ -1339,6 +1346,56 @@ class Database:
                 "UPDATE x_schedule SET last_run_at = ?, last_run_status = ? WHERE id = 1",
                 (self._now(), status),
             )
+
+    # ------------------------------------------------------------------
+    # Run lifecycle helpers for the API run-now flow (Sub-phase X5).
+    # Reuse existing agent_runs columns (no migration): records_new=posts_fetched,
+    # records_updated=posts_classified, calls_used=api_calls_used,
+    # triggered_by=trigger_source. start_run()/finish_run() are unchanged.
+    # ------------------------------------------------------------------
+
+    # Live-progress columns the run-now task is allowed to update.
+    _RUN_UPDATE_FIELDS = {"records_new", "records_updated", "calls_used", "status", "error_message"}
+
+    def get_running_run(self) -> dict | None:
+        """Most recent in-flight run, for the concurrency guard. None if idle."""
+        rows = self.query(
+            "SELECT * FROM agent_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+        )
+        return rows[0] if rows else None
+
+    def get_run(self, run_id: int) -> dict | None:
+        """Single agent_runs row by id (None if not found)."""
+        rows = self.query("SELECT * FROM agent_runs WHERE id = ?", (run_id,))
+        return rows[0] if rows else None
+
+    def update_run(self, run_id: int, **fields) -> None:
+        """Partial live update of an agent_runs row (run-now progress). Only the
+        allowlisted columns may be set; unknown fields raise ValueError."""
+        set_clauses: list[str] = []
+        params: list[Any] = []
+        for key, val in fields.items():
+            if key not in self._RUN_UPDATE_FIELDS:
+                raise ValueError(f"update_run: field not allowed: {key}")
+            set_clauses.append(f"{key} = ?")
+            params.append(val)
+        if not set_clauses:
+            return
+        params.append(run_id)
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE agent_runs SET {', '.join(set_clauses)} WHERE id = ?",
+                tuple(params),
+            )
+
+    def api_calls_this_month(self) -> int:
+        """Sum of scrape API calls (agent_runs.calls_used) for the current month —
+        the budget-guard signal for run-now (NOT OpenRouter/LLM call counts)."""
+        rows = self.query(
+            "SELECT COALESCE(SUM(calls_used), 0) AS c FROM agent_runs "
+            "WHERE strftime('%Y-%m', started_at) = strftime('%Y-%m', 'now')"
+        )
+        return int(rows[0]["c"]) if rows else 0
 
     # ------------------------------------------------------------------
     # User ID cache (handle → Twitter numeric user_id)

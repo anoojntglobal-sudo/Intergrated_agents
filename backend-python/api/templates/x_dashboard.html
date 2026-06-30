@@ -113,6 +113,13 @@
         <p class="loading">Loading scheduler…</p>
       </div>
     </details>
+    <details class="control-panel">
+      <summary>Run agent manually</summary>
+      <div hx-get="/dashboard/x/_run-agent"
+           hx-trigger="toggle from:closest details" hx-swap="innerHTML">
+        <p class="loading">Loading…</p>
+      </div>
+    </details>
   </section>
 
   <footer class="site-footer">

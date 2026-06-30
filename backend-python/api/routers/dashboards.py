@@ -30,7 +30,7 @@ from pydantic import ValidationError
 
 from agents.brand_visibility.linkedin.db import LinkedInDatabase
 from agents.brand_visibility.x.db import Database as XDatabase
-from api.routers.x import get_x_db
+from api.routers.x import get_x_db, X_MONTHLY_API_BUDGET
 from api.routers.linkedin import (
     MONTHLY_BUDGET,
     PostSort,
@@ -633,3 +633,89 @@ def x_scheduler_form_save(
 
     status = {"type": "success", "message": "Schedule saved."}
     return templates.TemplateResponse(request, "_x_scheduler_form.html", _x_scheduler_context(db, status=status))
+
+
+# ── X run-agent panel + polling (Sub-phase X5) ──────────────────────────────
+
+def _x_run_agent_context(db: XDatabase) -> dict:
+    sched = db.get_schedule()
+    used = db.api_calls_this_month()
+    cost = db.cost_summary()
+    last = db.query("SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 1")
+    last_run = None
+    if last:
+        r = last[0]
+        last_run = {
+            **r,
+            "started_display": _fmt_ts(r.get("started_at")),
+            "ended_display": _fmt_ts(r.get("ended_at")) if r.get("ended_at") else None,
+        }
+    return {
+        "sched": sched,
+        "budget_used": used,
+        "budget_cap": X_MONTHLY_API_BUDGET,
+        "budget_remaining": max(0, X_MONTHLY_API_BUDGET - used),
+        "cost_this_month": cost["total_this_month_usd"],
+        "last_run": last_run,
+    }
+
+
+@router.get("/dashboard/x/_run-agent", response_class=HTMLResponse)
+def x_run_agent(request: Request, db: XDatabase = Depends(get_x_db)):
+    return templates.TemplateResponse(request, "_x_run_agent.html", _x_run_agent_context(db))
+
+
+@router.post("/dashboard/x/_run-agent", response_class=HTMLResponse)
+def x_run_agent_trigger(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: XDatabase = Depends(get_x_db),
+):
+    """HTML wrapper over the JSON POST /api/x/run-now (single source of guard +
+    start logic). Returns the polling partial on 202, or a red banner on
+    409/429 — HTMX can't render the JSON API's body/4xx directly. The JSON
+    /api/x/run-now still exists for Render Cron. post_enabled stays False."""
+    from api.routers.x import run_now as x_run_now
+    try:
+        result = x_run_now(background_tasks, db=db)
+    except HTTPException as exc:
+        d = exc.detail if isinstance(exc.detail, dict) else {"reason": str(exc.detail)}
+        if exc.status_code == 409:
+            msg = f"Already running (run_id={d.get('run_id')})."
+        elif exc.status_code == 429:
+            msg = (f"Would exceed monthly budget "
+                   f"(used {d.get('current_calls')}/{d.get('monthly_budget')}, "
+                   f"this run needs up to {d.get('requested_max')}).")
+        else:
+            msg = str(d)
+        return HTMLResponse(f'<div id="x-run-status" class="status status-error">{msg}</div>')
+
+    ctx = {
+        "run_id": result["run_id"], "status": "running", "terminal": False,
+        "just_started": True, "posts_fetched": 0, "posts_classified": 0,
+        "api_calls": 0, "error_message": None,
+    }
+    return templates.TemplateResponse(request, "_x_run_status.html", ctx)
+
+
+@router.get("/dashboard/x/_run-status/{run_id}", response_class=HTMLResponse)
+def x_run_status_partial(request: Request, run_id: int, db: XDatabase = Depends(get_x_db)):
+    """HTML poller. While 'running' it self-refreshes every 5s; on a terminal
+    state it drops the trigger (polling stops) and refreshes the KPI strip."""
+    run = db.get_run(run_id)
+    if not run:
+        return HTMLResponse(
+            f'<div id="x-run-status" class="status status-error">Run {run_id} not found.</div>'
+        )
+    status = run.get("status")
+    ctx = {
+        "run_id": run_id,
+        "status": status,
+        "terminal": status in ("completed", "completed_partial", "failed", "cancelled"),
+        "just_started": False,
+        "posts_fetched": run.get("records_new") or 0,
+        "posts_classified": run.get("records_updated") or 0,
+        "api_calls": run.get("calls_used") or 0,
+        "error_message": run.get("error_message"),
+    }
+    return templates.TemplateResponse(request, "_x_run_status.html", ctx)
