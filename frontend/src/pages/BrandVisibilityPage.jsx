@@ -3,8 +3,9 @@ import PlatformShell from '../components/PlatformShell';
 
 const PLATFORM_AGENTS = [
   {
-    icon: '𝕏', title: 'X Agent', status: 'live', statusLabel: 'Active', to: '/dashboard',
-    desc: 'Discovers and scores X accounts for promotion — joins relevant pain-point conversations, surfaces influencers and PR contacts, and tracks your field. Opens the full X Agent dashboard.',
+    icon: '𝕏', title: 'X Agent', status: 'live', statusLabel: 'Active',
+    to: '/brand/x',
+    desc: 'Voice AI builder conversations on X — discovers builders in real time, classifies threads, and tracks signal across the firehose.',
     cta: 'Open dashboard',
   },
   {
