@@ -869,8 +869,9 @@ code, .mono, pre { font-family: var(--mono); }
   .shell-h1, .shell-eyebrow, .shell-sub, .agent-option-card, .login-card, .placeholder-wrap { animation: none; }
 }
 
-/* ── LinkedIn Agent embedded dashboard ───────────────────────────────────── */
-.linkedin-iframe-wrap {
+/* ── LinkedIn + X Agent embedded dashboards (shared iframe styling) ───────── */
+.linkedin-iframe-wrap,
+.x-iframe-wrap {
   position: relative;
   width: 100%;
   background: var(--surface);
@@ -881,7 +882,8 @@ code, .mono, pre { font-family: var(--mono); }
   min-height: calc(100vh - 320px);
   animation: cardIn .55s cubic-bezier(.2,.7,.2,1) both;
 }
-.linkedin-iframe {
+.linkedin-iframe,
+.x-iframe {
   width: 100%;
   height: calc(100vh - 320px);
   border: 0;
