@@ -20,8 +20,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from agents.brand_visibility.linkedin.db import LinkedInDatabase
+from agents.brand_visibility.x.db import Database as XDatabase
 from api.routers import dashboards as dashboards_router
 from api.routers import linkedin as linkedin_router
+from api.routers import x as x_router
 
 API_VERSION = "0.1.0"
 
@@ -45,6 +47,20 @@ async def lifespan(app: FastAPI):
     except Exception:  # best-effort; libsql may not require an explicit close
         pass
     logger.info("Schema initialization complete")
+
+    # Initialize X (KA017) schema ONCE at startup (skip_schema_init=False). This
+    # creates x_active_prompt and runs the one-time file->DB prompt migration
+    # (Sub-phase X3); existing X tables use CREATE/ALTER IF NOT EXISTS, so they
+    # are untouched. Request handlers use XDatabase(skip_schema_init=True).
+    try:
+        xdb = XDatabase()  # default skip_schema_init=False -> runs DDL + migration once
+        logger.info("X DB init OK (scraped_tweets: %s rows)", xdb.count_posts())
+        xconn = getattr(xdb, "_conn_obj", None)
+        if xconn is not None and hasattr(xconn, "close"):
+            xconn.close()
+    except Exception:
+        logger.exception("X DB init/connectivity check FAILED (dashboard /dashboard/x may error)")
+
     yield
     logger.info("API shutdown complete")
 
@@ -74,6 +90,7 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 # Platform routers
 app.include_router(linkedin_router.router, prefix="/api/linkedin", tags=["linkedin"])
+app.include_router(x_router.router, prefix="/api/x", tags=["x"])
 # Server-rendered HTML dashboards
 app.include_router(dashboards_router.router, tags=["dashboards"])
 
@@ -97,10 +114,10 @@ def agent_info() -> dict:
     return {
         "slug": "brand-visibility",
         "name": "Brand Visibility Agent",
-        "description": "Voice AI builder signals from X and LinkedIn (LinkedIn live, X coming soon)",
+        "description": "Voice AI builder signals from X and LinkedIn",
         "has_platforms": True,
-        # TODO: re-add X platform entry to `platforms` array once /api/x/* endpoints exist
         "platforms": [
+            {"slug": "x", "name": "X", "dashboard_url": "/dashboard/x"},
             {"slug": "linkedin", "name": "LinkedIn", "dashboard_url": "/dashboard/linkedin"},
         ],
     }

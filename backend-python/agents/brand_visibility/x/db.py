@@ -152,8 +152,21 @@ def _row_to_dict(row, columns: list[str]) -> dict:
 class Database:
     """Turso-backed data access via the libsql embedded-replica driver."""
 
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(self, db_path: str | None = None, skip_schema_init: bool = False,
+                 sync_interval: int | None = TURSO_SYNC_INTERVAL) -> None:
         # db_path kept for backward compatibility — ignored, we use Turso.
+        #
+        # skip_schema_init: when True, connect + sync only — skip all CREATE/ALTER
+        # DDL and migrations. Used by the read-only FastAPI dependency (api/routers/x.py)
+        # so dashboard requests don't replay schema DDL (and its commits) on every
+        # call. Default False preserves existing behavior for the orchestrator,
+        # classifier, scraper, scripts, and Streamlit dashboard.
+        #
+        # sync_interval: seconds between background replica syncs. Default keeps the
+        # existing behavior. Pass None to DISABLE background sync — required for
+        # write-heavy work like the X5 run-now background task, where a background
+        # sync firing mid-write can trigger a libsql WAL conflict. With None, the
+        # caller MUST call .sync() explicitly to flush writes to remote Turso.
         if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
             raise RuntimeError(
                 "TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be set in .env. "
@@ -164,14 +177,17 @@ class Database:
             self.replica_path,
             TURSO_DATABASE_URL,
             TURSO_AUTH_TOKEN,
-            sync_interval=TURSO_SYNC_INTERVAL,
+            sync_interval=sync_interval,
         )
         self._conn_obj.sync()
-        self._init_schema()
-        self._migrate_columns()
-        self._migrate_useful_promoters()
-        self._migrate_author_reputation()
-        self._migrate_classification_costs()
+        if not skip_schema_init:
+            self._init_schema()
+            self._migrate_columns()
+            self._migrate_useful_promoters()
+            self._migrate_author_reputation()
+            self._migrate_classification_costs()
+            self._migrate_active_prompt()
+            self._migrate_schedule()
 
     def _init_schema(self) -> None:
         for stmt in SCHEMA_STATEMENTS:
@@ -282,6 +298,86 @@ class Database:
                 logger.warning("classification_costs migration statement failed (may already exist): %s", exc)
         self._conn_obj.commit()
         logger.info("classification_costs table ready")
+
+    def _migrate_active_prompt(self) -> None:
+        """Create x_active_prompt (versioned, multi-row history) and, on the FIRST
+        run only, seed v1 from the file-based prompt (config/prompts/active.txt).
+        Idempotent: re-runs are no-ops once a row exists. The file is kept on disk
+        as a fallback + git-tracked reference (Sub-phase X3)."""
+        statements = [
+            """CREATE TABLE IF NOT EXISTS x_active_prompt (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL,
+                content TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_x_active_prompt_active ON x_active_prompt(is_active)",
+        ]
+        for stmt in statements:
+            try:
+                self._conn_obj.execute(stmt)
+            except Exception as exc:
+                logger.warning("x_active_prompt migration statement failed (may already exist): %s", exc)
+        self._conn_obj.commit()
+
+        # One-time seed from the file prompt (only when the table is empty).
+        try:
+            count = self.query("SELECT COUNT(*) AS c FROM x_active_prompt")[0]["c"]
+        except Exception:
+            count = 1  # be conservative — never double-seed if the count read fails
+        if count == 0:
+            content = (self._file_prompt().get("content") or "")
+            if content.strip():
+                with self._conn() as conn:
+                    conn.execute(
+                        "INSERT INTO x_active_prompt (version, content, is_active, created_at) "
+                        "VALUES ('v1', ?, 1, ?)",
+                        (content, self._now()),
+                    )
+                logger.info("Migrated X prompt v1 from file to DB (%d chars)", len(content))
+            else:
+                logger.warning("Skipped X prompt migration: file prompt empty/missing")
+
+    def _migrate_schedule(self) -> None:
+        """Create x_schedule (single-row sweep config) and seed conservative
+        defaults on first run (Sub-phase X4). Columns mirror the X orchestrator's
+        tunable sweep inputs — NOT LinkedIn's schema. No enabled/interval/
+        next_run_at: cadence is owned by Render Cron, not this table."""
+        stmt = """CREATE TABLE IF NOT EXISTS x_schedule (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            mode TEXT NOT NULL DEFAULT 'all',
+            sweep_type TEXT NOT NULL DEFAULT 'Latest',
+            max_pages INTEGER NOT NULL DEFAULT 1,
+            max_keywords INTEGER NOT NULL DEFAULT 5,
+            class_filter TEXT NOT NULL DEFAULT '',
+            since_hours INTEGER,
+            max_api_calls INTEGER NOT NULL DEFAULT 12,
+            last_run_at TEXT,
+            last_run_status TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )"""
+        try:
+            self._conn_obj.execute(stmt)
+        except Exception as exc:
+            logger.warning("x_schedule migration statement failed (may already exist): %s", exc)
+        self._conn_obj.commit()
+
+        try:
+            count = self.query("SELECT COUNT(*) AS c FROM x_schedule")[0]["c"]
+        except Exception:
+            count = 1  # never double-seed if the count read fails
+        if count == 0:
+            with self._conn() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO x_schedule "
+                    "(id, mode, sweep_type, max_pages, max_keywords, class_filter, "
+                    " since_hours, max_api_calls, updated_at) "
+                    "VALUES (1, 'all', 'Latest', 1, 5, '', NULL, 12, ?)",
+                    (self._now(),),
+                )
+            logger.info("Seeded default X schedule "
+                        "(mode=all, sweep_type=Latest, max_pages=1, max_keywords=5, max_api_calls=12)")
 
     # Allowed enum values for useful_promoters
     _PROMOTION_KINDS = {"vendor", "self", "agency", "course", "vc_portfolio"}
@@ -891,6 +987,415 @@ class Database:
             cur = conn.execute(sql, params)
             cols = [d[0] for d in cur.description] if cur.description else []
             return [_row_to_dict(row, cols) for row in cur.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Read helpers for the FastAPI dashboard (Sub-phase X1, read-only)
+    #
+    # Schema reminders (the contract field names differ from the real columns,
+    # so these methods map):
+    #   scraped_tweets: text=content, created_at=posted_at, confirmed_class=class,
+    #     priority_flag is a TEXT enum (URGENT_*/STANDARD/LOW_PRIORITY_CONTENT),
+    #     author_reputation_label=reputation, no display-name column (handle only).
+    #   agent_runs: ended_at (not finished_at), records_new/records_updated,
+    #     no keywords_queried/posts_classified columns (parsed from summary_json).
+    #   llm_costs: estimated_cost_usd (the cost column), called_at.
+    # ------------------------------------------------------------------
+
+    # Sort keys -> safe ORDER BY (whitelist; never interpolate user input). SQLite
+    # sorts NULLs last under DESC, so unscored/unclassified rows fall to the end.
+    _POSTS_ORDER = {
+        "posted_desc": "created_at DESC",
+        "priority_then_quality": (
+            "CASE WHEN priority_flag LIKE 'URGENT%' THEN 0 ELSE 1 END, "
+            "quality_score DESC, created_at DESC"
+        ),
+        "recent_classifications": "classified_at DESC",
+    }
+
+    @staticmethod
+    def _posts_where(class_filter: list[str] | None, search: str | None):
+        """Build the shared WHERE clause for list_posts/count (parameterized)."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if class_filter:
+            clauses.append(f"confirmed_class IN ({', '.join('?' for _ in class_filter)})")
+            params.extend(class_filter)
+        if search:
+            clauses.append("(text LIKE ? OR author_handle LIKE ?)")
+            like = f"%{search}%"
+            params.extend([like, like])
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where, params
+
+    def count_posts(self) -> int:
+        """Total scraped_tweets rows."""
+        rows = self.query("SELECT COUNT(*) AS c FROM scraped_tweets")
+        return rows[0]["c"] if rows else 0
+
+    def count_posts_filtered(self, class_filter: list[str] | None = None,
+                             search: str | None = None) -> int:
+        """Row count under the same filters as list_posts — drives pagination."""
+        where, params = self._posts_where(class_filter, search)
+        rows = self.query(f"SELECT COUNT(*) AS c FROM scraped_tweets{where}", tuple(params))
+        return rows[0]["c"] if rows else 0
+
+    def kpi_stats(self) -> dict:
+        """Top-of-dashboard metrics. by_class maps confirmed_class -> count;
+        high_priority counts URGENT_* tweets (priority_flag is a TEXT enum)."""
+        total = self.count_posts()
+        classified = self.query(
+            "SELECT COUNT(*) AS c FROM scraped_tweets WHERE confirmed_class IS NOT NULL"
+        )[0]["c"]
+        last = self.query("SELECT MAX(ingested_at) AS m FROM scraped_tweets")[0]["m"]
+        high_priority = self.query(
+            "SELECT COUNT(*) AS c FROM scraped_tweets WHERE priority_flag LIKE 'URGENT%'"
+        )[0]["c"]
+        by_class = {
+            r["k"]: r["c"]
+            for r in self.query(
+                "SELECT confirmed_class AS k, COUNT(*) AS c FROM scraped_tweets "
+                "WHERE confirmed_class IS NOT NULL GROUP BY confirmed_class"
+            )
+        }
+        return {
+            "total_posts": total,
+            "classified": classified,
+            "unclassified": total - classified,
+            "last_scraped_at": last,
+            "high_priority": high_priority,
+            "by_class": by_class,
+        }
+
+    def list_posts(self, class_filter: list[str] | None = None, search: str | None = None,
+                   offset: int = 0, limit: int = 50,
+                   sort_by: str = "priority_then_quality") -> list[dict]:
+        """One page of tweets as dashboard-ready dicts. engagement is computed
+        (likes+RTs+replies). author_name is None — scraped_tweets stores only the
+        handle. reputation comes from the author_reputation_label overlay column."""
+        where, params = self._posts_where(class_filter, search)
+        order = self._POSTS_ORDER.get(sort_by, self._POSTS_ORDER["priority_then_quality"])
+        sql = (
+            "SELECT tweet_id, author_handle, text, created_at, confirmed_class, "
+            "priority_flag, quality_score, velocity, is_builder, author_reputation_label, "
+            "(COALESCE(like_count,0) + COALESCE(retweet_count,0) + COALESCE(reply_count,0)) "
+            "AS engagement "
+            f"FROM scraped_tweets{where} ORDER BY {order} LIMIT ? OFFSET ?"
+        )
+        rows = self.query(sql, tuple(params + [limit, offset]))
+        out = []
+        for r in rows:
+            out.append({
+                "tweet_id": r["tweet_id"],
+                "author_handle": r["author_handle"],
+                "author_name": None,  # no display-name column in scraped_tweets
+                "content": r["text"],
+                "posted_at": r["created_at"],
+                "classification": r["confirmed_class"],
+                "priority_flag": r["priority_flag"],
+                "quality_score": r["quality_score"],
+                "velocity": r["velocity"],
+                "is_builder": bool(r["is_builder"]) if r["is_builder"] is not None else None,
+                "reputation": r["author_reputation_label"],
+                "engagement": r["engagement"] or 0,
+            })
+        return out
+
+    def get_recent_runs(self, limit: int = 20) -> list[dict]:
+        """Latest agent_runs, mapped to the dashboard contract. The real table
+        has ended_at/records_new/records_updated and no keywords_queried/
+        posts_classified columns, so the latter come from summary_json if present."""
+        rows = self.query(
+            "SELECT id, started_at, ended_at, status, triggered_by, calls_used, "
+            "records_new, records_updated, error_message, summary_json "
+            "FROM agent_runs ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        )
+        out = []
+        for r in rows:
+            summary = {}
+            if r.get("summary_json"):
+                try:
+                    summary = json.loads(r["summary_json"])
+                except Exception:
+                    summary = {}
+            out.append({
+                "id": r["id"],
+                "started_at": r["started_at"],
+                "finished_at": r["ended_at"],
+                "status": r["status"],
+                "triggered_by": r["triggered_by"],
+                "keywords_queried": summary.get("keywords_queried"),
+                "posts_fetched": r["records_new"],
+                "posts_classified": summary.get("posts_classified", r["records_updated"]),
+                "error_message": r["error_message"],
+            })
+        return out
+
+    def cost_summary(self) -> dict:
+        """LLM spend from llm_costs (cost column = estimated_cost_usd)."""
+        total_all = self.query(
+            "SELECT COALESCE(SUM(estimated_cost_usd), 0) AS s FROM llm_costs"
+        )[0]["s"]
+        total_month = self.query(
+            "SELECT COALESCE(SUM(estimated_cost_usd), 0) AS s FROM llm_costs "
+            "WHERE strftime('%Y-%m', called_at) = strftime('%Y-%m', 'now')"
+        )[0]["s"]
+        rows_count = self.query("SELECT COUNT(*) AS c FROM llm_costs")[0]["c"]
+        by_model = [
+            {"model": r["model"], "posts": r["c"],
+             "total_cost_usd": round(float(r["s"]), 6)}
+            for r in self.query(
+                "SELECT model, COUNT(*) AS c, COALESCE(SUM(estimated_cost_usd), 0) AS s "
+                "FROM llm_costs GROUP BY model ORDER BY s DESC"
+            )
+        ]
+        return {
+            "total_all_time_usd": round(float(total_all), 6),
+            "total_this_month_usd": round(float(total_month), 6),
+            "posts_classified": rows_count,  # count of llm_costs rows (all purposes)
+            "by_model": by_model,
+        }
+
+    def _file_prompt(self) -> dict:
+        """Read the file-based prompt (config/prompts/active.txt -> <name>.txt).
+        Kept as the fallback source after the X3 DB migration. Returns
+        {filename, content, updated_at(mtime)}."""
+        from pathlib import Path
+        prompts_dir = Path(__file__).resolve().parents[3] / "config" / "prompts"
+        try:
+            name = (prompts_dir / "active.txt").read_text(encoding="utf-8").strip()
+        except Exception:
+            name = ""
+        filename = name if name.endswith(".txt") else (f"{name}.txt" if name else "")
+        content, updated_at = "", None
+        if filename:
+            fpath = prompts_dir / filename
+            try:
+                content = fpath.read_text(encoding="utf-8")
+                updated_at = datetime.fromtimestamp(
+                    fpath.stat().st_mtime, tz=timezone.utc
+                ).isoformat()
+            except Exception:
+                pass
+        return {"filename": filename, "content": content, "updated_at": updated_at}
+
+    def get_active_prompt(self) -> dict:
+        """Active classifier prompt (Sub-phase X3: DB-first, file fallback).
+
+        Returns {version, content, updated_at}. Primary source is the
+        x_active_prompt row with is_active=1; if that table/row is missing
+        (shouldn't happen post-migration), falls back to the file prompt with
+        version='file'. Never returns None — callers (classifier, API) rely on
+        a content string being present."""
+        try:
+            rows = self.query(
+                "SELECT version, content, created_at FROM x_active_prompt "
+                "WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
+            )
+        except Exception as exc:
+            logger.warning("x_active_prompt read failed (%s); falling back to file prompt", exc)
+            rows = []
+        if rows:
+            r = rows[0]
+            return {"version": r["version"], "content": r["content"], "updated_at": r["created_at"]}
+        logger.warning("No active x_active_prompt row; falling back to file prompt")
+        f = self._file_prompt()
+        return {"version": "file", "content": f["content"], "updated_at": f["updated_at"]}
+
+    def set_active_prompt(self, version: str, content: str) -> dict:
+        """Save a new active prompt version (Sub-phase X3). Deactivates the
+        current active row and inserts a new is_active=1 row (immutable history;
+        matches LinkedIn's "save creates a new active version" semantics).
+        Raises ValueError on invalid input. Returns the new row as a dict."""
+        version = (version or "").strip()
+        content = content if content is not None else ""
+        if not version:
+            raise ValueError("version must be non-empty")
+        if len(version) > 64:
+            raise ValueError("version too long (max 64 characters)")
+        if not content.strip():
+            raise ValueError("content must be non-empty")
+        if len(content) > 50_000:
+            raise ValueError("content too long (max 50000 characters)")
+
+        with self._conn() as conn:
+            conn.execute("UPDATE x_active_prompt SET is_active = 0 WHERE is_active = 1")
+            cur = conn.execute(
+                "INSERT INTO x_active_prompt (version, content, is_active, created_at) "
+                "VALUES (?, ?, 1, ?)",
+                (version, content, self._now()),
+            )
+            new_id = cur.lastrowid
+        rows = self.query(
+            "SELECT id, version, content, is_active, created_at FROM x_active_prompt WHERE id = ?",
+            (new_id,),
+        )
+        return rows[0] if rows else {}
+
+    def list_prompt_versions(self) -> list[dict]:
+        """Version history metadata (no content) for the editor — newest first."""
+        try:
+            return self.query(
+                "SELECT id, version, is_active, created_at FROM x_active_prompt "
+                "ORDER BY id DESC LIMIT 20"
+            )
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
+    # Sweep schedule config (Sub-phase X4) — single row (id=1). Config-only:
+    # stores the orchestrator's tunable sweep params. Render Cron owns cadence
+    # (no enabled/interval/next_run_at here). Nothing reads this table until X5.
+    # ------------------------------------------------------------------
+
+    # Editable columns (everything else — id/last_run_*/updated_at — is managed).
+    _SCHEDULE_EDITABLE = {
+        "mode", "sweep_type", "max_pages", "max_keywords",
+        "class_filter", "since_hours", "max_api_calls",
+    }
+    _SCHEDULE_MODES = {
+        "keywords", "influencers", "reply_trees", "classify", "cluster", "draft", "all",
+    }
+    _SCHEDULE_SWEEP_TYPES = {"Latest", "Top"}
+    _SCHEDULE_CLASSES = {
+        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "NOISE", "GOVT_PROMOTION",
+    }
+
+    @classmethod
+    def _validate_schedule_field(cls, key: str, value):
+        """Coerce + validate one editable schedule field. Form values arrive as
+        strings, so ints are coerced here. Raises ValueError on bad input."""
+        def _as_int(name, lo, hi):
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} must be an integer")
+            if n < lo or n > hi:
+                raise ValueError(f"{name} must be between {lo} and {hi}")
+            return n
+
+        if key == "mode":
+            v = str(value).strip()
+            if v not in cls._SCHEDULE_MODES:
+                raise ValueError(f"mode must be one of {sorted(cls._SCHEDULE_MODES)}")
+            return v
+        if key == "sweep_type":
+            v = str(value).strip()
+            if v not in cls._SCHEDULE_SWEEP_TYPES:
+                raise ValueError("sweep_type must be 'Latest' or 'Top'")
+            return v
+        if key == "max_pages":
+            return _as_int("max_pages", 1, 10)
+        if key == "max_keywords":
+            return _as_int("max_keywords", 1, 50)
+        if key == "max_api_calls":
+            return _as_int("max_api_calls", 1, 100)
+        if key == "since_hours":
+            if value is None or str(value).strip() == "":
+                return None  # NULL = no time filter
+            return _as_int("since_hours", 1, 720)
+        if key == "class_filter":
+            v = str(value).strip()
+            if v:
+                toks = [t.strip() for t in v.split(",") if t.strip()]
+                bad = [t for t in toks if t not in cls._SCHEDULE_CLASSES]
+                if bad:
+                    raise ValueError(f"class_filter has unknown class code(s): {bad}")
+                v = ",".join(toks)
+            return v
+        raise ValueError(f"unknown/uneditable field: {key}")
+
+    def get_schedule(self) -> dict:
+        """Return the single x_schedule row (id=1). Raises if missing — the
+        migration seeds it, so a missing row signals a real problem."""
+        rows = self.query("SELECT * FROM x_schedule WHERE id = 1")
+        if not rows:
+            raise RuntimeError(
+                "x_schedule row (id=1) is missing — schema migration did not seed it"
+            )
+        return rows[0]
+
+    def update_schedule(self, **kwargs) -> dict:
+        """Partial update of editable schedule fields. Unknown/uneditable field
+        names and invalid values raise ValueError. Only provided fields change;
+        updated_at is bumped. Returns the updated row."""
+        self.get_schedule()  # ensure the row exists (raises clear error if not)
+        set_clauses: list[str] = []
+        params: list[Any] = []
+        for key, raw in kwargs.items():
+            if key not in self._SCHEDULE_EDITABLE:
+                raise ValueError(f"unknown/uneditable field: {key}")
+            set_clauses.append(f"{key} = ?")
+            params.append(self._validate_schedule_field(key, raw))
+        if not set_clauses:
+            return self.get_schedule()
+        set_clauses.append("updated_at = ?")
+        params.extend([self._now(), 1])
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE x_schedule SET {', '.join(set_clauses)} WHERE id = ?",
+                tuple(params),
+            )
+        return self.get_schedule()
+
+    def set_last_run(self, status: str) -> None:
+        """Stamp last_run_at=now and last_run_status. Called by the X5 run-now
+        flow; added now so the contract exists. status is typically 'ok'/'failed'."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE x_schedule SET last_run_at = ?, last_run_status = ? WHERE id = 1",
+                (self._now(), status),
+            )
+
+    # ------------------------------------------------------------------
+    # Run lifecycle helpers for the API run-now flow (Sub-phase X5).
+    # Reuse existing agent_runs columns (no migration): records_new=posts_fetched,
+    # records_updated=posts_classified, calls_used=api_calls_used,
+    # triggered_by=trigger_source. start_run()/finish_run() are unchanged.
+    # ------------------------------------------------------------------
+
+    # Live-progress columns the run-now task is allowed to update.
+    _RUN_UPDATE_FIELDS = {"records_new", "records_updated", "calls_used", "status", "error_message"}
+
+    def get_running_run(self) -> dict | None:
+        """Most recent in-flight run, for the concurrency guard. None if idle."""
+        rows = self.query(
+            "SELECT * FROM agent_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+        )
+        return rows[0] if rows else None
+
+    def get_run(self, run_id: int) -> dict | None:
+        """Single agent_runs row by id (None if not found)."""
+        rows = self.query("SELECT * FROM agent_runs WHERE id = ?", (run_id,))
+        return rows[0] if rows else None
+
+    def update_run(self, run_id: int, **fields) -> None:
+        """Partial live update of an agent_runs row (run-now progress). Only the
+        allowlisted columns may be set; unknown fields raise ValueError."""
+        set_clauses: list[str] = []
+        params: list[Any] = []
+        for key, val in fields.items():
+            if key not in self._RUN_UPDATE_FIELDS:
+                raise ValueError(f"update_run: field not allowed: {key}")
+            set_clauses.append(f"{key} = ?")
+            params.append(val)
+        if not set_clauses:
+            return
+        params.append(run_id)
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE agent_runs SET {', '.join(set_clauses)} WHERE id = ?",
+                tuple(params),
+            )
+
+    def api_calls_this_month(self) -> int:
+        """Sum of scrape API calls (agent_runs.calls_used) for the current month —
+        the budget-guard signal for run-now (NOT OpenRouter/LLM call counts)."""
+        rows = self.query(
+            "SELECT COALESCE(SUM(calls_used), 0) AS c FROM agent_runs "
+            "WHERE strftime('%Y-%m', started_at) = strftime('%Y-%m', 'now')"
+        )
+        return int(rows[0]["c"]) if rows else 0
 
     # ------------------------------------------------------------------
     # User ID cache (handle → Twitter numeric user_id)

@@ -18,7 +18,7 @@ assorted polish. Still no new JSON API endpoints — cost data reuses the Phase 
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from typing import Optional
@@ -29,6 +29,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
 from agents.brand_visibility.linkedin.db import LinkedInDatabase
+from agents.brand_visibility.x.db import Database as XDatabase
+from api.routers.x import get_x_db, X_MONTHLY_API_BUDGET
 from api.routers.linkedin import (
     MONTHLY_BUDGET,
     PostSort,
@@ -369,3 +371,351 @@ def cost_view(request: Request, db: LinkedInDatabase = Depends(get_db)):
         "avg_cost": avg_cost,
     }
     return templates.TemplateResponse(request, "_cost_view.html", context)
+
+
+# ==========================================================================
+# X (KA017) dashboard — Sub-phase X1 (read-only): KPI strip, posts table,
+# filters, pagination. Mirrors the LinkedIn dashboard endpoints but lives
+# alongside them; no writes/schedule/prompt/run-now in this sub-phase.
+# ==========================================================================
+
+# The sidebar "Other" checkbox collapses the rare classes into one filter value.
+X_CLASS_OTHER = ["H", "I", "J", "K", "GOVT_PROMOTION"]
+
+
+def _rel_time(ts) -> str:
+    """Compact relative time, e.g. 'just now', '5m ago', '2h ago', '3d ago';
+    falls back to an absolute date beyond ~30 days."""
+    if not ts:
+        return "—"
+    try:
+        d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        secs = (datetime.now(timezone.utc) - d).total_seconds()
+        if secs < 60:
+            return "just now"
+        if secs < 3600:
+            return f"{int(secs // 60)}m ago"
+        if secs < 86_400:
+            return f"{int(secs // 3600)}h ago"
+        if secs < 2_592_000:
+            return f"{int(secs // 86_400)}d ago"
+        return d.strftime("%b %d, %Y")
+    except Exception:
+        return str(ts)
+
+
+def _compact(n) -> str:
+    """Compact engagement count: 1234 -> '1.2k', 2_500_000 -> '2.5M'."""
+    try:
+        n = int(n or 0)
+    except Exception:
+        return "0"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _x_kpi_context(db: XDatabase) -> dict:
+    """Context for the X KPI strip — shared by first paint (include) and the
+    standalone /dashboard/x/_kpi-strip refresh endpoint."""
+    s = db.kpi_stats()
+    bc = s["by_class"]
+    shown = {k: bc.get(k, 0) for k in ("A", "B", "C", "F")}
+    pct = round(100 * s["classified"] / s["total_posts"]) if s["total_posts"] else 0
+    return {
+        "kpi": s,
+        "last_scraped_display": _fmt_ts(s["last_scraped_at"]),
+        "classified_pct": pct,
+        "dist": {**shown, "OTHER": max(0, s["classified"] - sum(shown.values()))},
+    }
+
+
+@router.get("/dashboard/x", response_class=HTMLResponse)
+def x_dashboard(
+    request: Request,
+    embedded: bool = Query(False),
+    db: XDatabase = Depends(get_x_db),
+):
+    context = {**_x_kpi_context(db), "embedded": embedded}
+    return templates.TemplateResponse(request, "x_dashboard.html", context)
+
+
+@router.get("/dashboard/x/_kpi-strip", response_class=HTMLResponse)
+def x_kpi_strip(request: Request, db: XDatabase = Depends(get_x_db)):
+    return templates.TemplateResponse(request, "_x_kpi_strip.html", _x_kpi_context(db))
+
+
+@router.get("/dashboard/x/_posts-table", response_class=HTMLResponse)
+def x_posts_table(
+    request: Request,
+    db: XDatabase = Depends(get_x_db),
+    cls: Optional[list[str]] = Query(None, alias="class"),
+    search: Optional[str] = Query(None),
+    sort_by: str = Query("priority_then_quality"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """HTML partial (tweets table + pagination). Expands the 'OTHER' checkbox
+    into the rare classes, then reuses Database.list_posts (single source of
+    truth). Empty class selection -> no class filter (shows all)."""
+    expanded: list[str] = []
+    for c in (cls or []):
+        expanded.extend(X_CLASS_OTHER if c == "OTHER" else [c])
+    class_filter = expanded or None
+
+    rows = db.list_posts(
+        class_filter=class_filter, search=search or None,
+        offset=offset, limit=limit, sort_by=sort_by,
+    )
+    total = db.count_posts_filtered(class_filter=class_filter, search=search or None)
+
+    for r in rows:
+        r["posted_display"] = _rel_time(r.get("posted_at"))
+        r["engagement_display"] = _compact(r.get("engagement"))
+        handle, tid = r.get("author_handle"), r.get("tweet_id")
+        r["tweet_url"] = f"https://x.com/{handle}/status/{tid}" if handle and tid else None
+
+    page_start = (offset + 1) if rows else 0
+    page_end = offset + len(rows)
+    context = {
+        "posts": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "page_start": page_start,
+        "page_end": page_end,
+        "prev_offset": max(0, offset - limit),
+        "next_offset": offset + limit,
+        "has_prev": offset > 0,
+        "has_next": (offset + limit) < total,
+        "page_sizes": PAGE_SIZES,
+    }
+    return templates.TemplateResponse(request, "_x_posts_table.html", context)
+
+
+@router.get("/dashboard/x/_cost-view", response_class=HTMLResponse)
+def x_cost_view(request: Request, db: XDatabase = Depends(get_x_db)):
+    """X cost panel (Sub-phase X2). Reuses Database.cost_summary() for totals +
+    by-model breakdown, plus a this-month classification count (rows in llm_costs
+    this month) for the average. The X cost column is estimated_cost_usd."""
+    cs = db.cost_summary()  # {total_all_time_usd, total_this_month_usd, posts_classified, by_model}
+
+    classifications_this_month = db.query(
+        "SELECT COUNT(*) AS c FROM llm_costs "
+        "WHERE strftime('%Y-%m', called_at) = strftime('%Y-%m', 'now')"
+    )[0]["c"]
+    avg_cost = (
+        cs["total_this_month_usd"] / classifications_this_month
+        if classifications_this_month else None
+    )
+
+    context = {
+        "this_month_total": cs["total_this_month_usd"],
+        "all_time_total": cs["total_all_time_usd"],
+        "posts_classified": cs["posts_classified"],
+        "by_model": cs["by_model"],
+        "classifications_this_month": classifications_this_month,
+        "avg_cost": avg_cost,
+    }
+    return templates.TemplateResponse(request, "_x_cost_view.html", context)
+
+
+def _x_next_version(db: XDatabase) -> str:
+    """Suggest the next version label: bump a 'vN' active version, else 'v<count+1>'."""
+    import re
+    cur = db.get_active_prompt() or {}
+    m = re.match(r"^v(\d+)$", str(cur.get("version") or ""))
+    if m:
+        return f"v{int(m.group(1)) + 1}"
+    return f"v{len(db.list_prompt_versions()) + 1}"
+
+
+def _x_prompt_editor_context(db: XDatabase, status: Optional[dict] = None,
+                            draft_text: Optional[str] = None) -> dict:
+    """Context for the X prompt editor. draft_text repopulates the textarea after
+    a failed save so the user doesn't lose their edit."""
+    cur = db.get_active_prompt() or {}
+    versions = db.list_prompt_versions()
+    return {
+        "prompt_version": cur.get("version"),
+        "prompt_text": draft_text if draft_text is not None else (cur.get("content") or ""),
+        "updated_display": _fmt_ts(cur.get("updated_at")),
+        "next_version": _x_next_version(db),
+        "max_chars": 50_000,
+        "status": status,
+        "versions": [{**v, "created_display": _fmt_ts(v.get("created_at"))} for v in versions],
+    }
+
+
+@router.get("/dashboard/x/_prompt-editor", response_class=HTMLResponse)
+def x_prompt_editor(request: Request, db: XDatabase = Depends(get_x_db)):
+    return templates.TemplateResponse(request, "_x_prompt_editor.html", _x_prompt_editor_context(db))
+
+
+@router.post("/dashboard/x/_prompt-editor", response_class=HTMLResponse)
+def x_prompt_editor_save(
+    request: Request,
+    prompt_text: str = Form(...),
+    prompt_version: str = Form(""),
+    db: XDatabase = Depends(get_x_db),
+):
+    """Save via db.set_active_prompt (single source of truth), then re-render the
+    editor with a status banner. Mirrors LinkedIn's guards: empty text -> error;
+    blank version -> auto-generate. Validation errors keep the submitted text."""
+    if not prompt_text.strip():
+        status = {"type": "error", "message": "Prompt text cannot be empty."}
+        ctx = _x_prompt_editor_context(db, status=status, draft_text=prompt_text)
+        return templates.TemplateResponse(request, "_x_prompt_editor.html", ctx)
+
+    version = prompt_version.strip() or _x_next_version(db)  # blank -> auto-increment
+    try:
+        row = db.set_active_prompt(version, prompt_text)
+    except ValueError as exc:
+        status = {"type": "error", "message": f"Invalid: {exc}"}
+        ctx = _x_prompt_editor_context(db, status=status, draft_text=prompt_text)
+        return templates.TemplateResponse(request, "_x_prompt_editor.html", ctx)
+
+    status = {"type": "success", "message": f"Saved as {row.get('version')}."}
+    return templates.TemplateResponse(request, "_x_prompt_editor.html", _x_prompt_editor_context(db, status=status))
+
+
+def _x_scheduler_context(db: XDatabase, status: Optional[dict] = None) -> dict:
+    s = db.get_schedule()
+    return {
+        "sched": s,
+        "last_run_display": _fmt_ts(s.get("last_run_at")) if s.get("last_run_at") else None,
+        "last_run_status": s.get("last_run_status"),
+        "status": status,
+    }
+
+
+@router.get("/dashboard/x/_scheduler-form", response_class=HTMLResponse)
+def x_scheduler_form(request: Request, db: XDatabase = Depends(get_x_db)):
+    return templates.TemplateResponse(request, "_x_scheduler_form.html", _x_scheduler_context(db))
+
+
+@router.put("/dashboard/x/_scheduler-form", response_class=HTMLResponse)
+def x_scheduler_form_save(
+    request: Request,
+    mode: str = Form(...),
+    sweep_type: str = Form(...),
+    max_pages: str = Form(...),
+    max_keywords: str = Form(...),
+    class_filter: str = Form(""),
+    since_hours: str = Form(""),
+    max_api_calls: str = Form(...),
+    db: XDatabase = Depends(get_x_db),
+):
+    """Persist sweep config via db.update_schedule. Blank text/since_hours fields
+    mean 'leave unchanged' (matches LinkedIn's semantic). db.update_schedule
+    coerces the string values and validates ranges/enums."""
+    updates: dict = {
+        "mode": mode,
+        "sweep_type": sweep_type,
+        "max_pages": max_pages,
+        "max_keywords": max_keywords,
+        "max_api_calls": max_api_calls,
+    }
+    if class_filter.strip():
+        updates["class_filter"] = class_filter.strip()
+    if since_hours.strip():
+        updates["since_hours"] = since_hours.strip()
+
+    try:
+        db.update_schedule(**updates)
+    except ValueError as exc:
+        status = {"type": "error", "message": f"Invalid: {exc}"}
+        return templates.TemplateResponse(request, "_x_scheduler_form.html", _x_scheduler_context(db, status=status))
+
+    status = {"type": "success", "message": "Schedule saved."}
+    return templates.TemplateResponse(request, "_x_scheduler_form.html", _x_scheduler_context(db, status=status))
+
+
+# ── X run-agent panel + polling (Sub-phase X5) ──────────────────────────────
+
+def _x_run_agent_context(db: XDatabase) -> dict:
+    sched = db.get_schedule()
+    used = db.api_calls_this_month()
+    cost = db.cost_summary()
+    last = db.query("SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 1")
+    last_run = None
+    if last:
+        r = last[0]
+        last_run = {
+            **r,
+            "started_display": _fmt_ts(r.get("started_at")),
+            "ended_display": _fmt_ts(r.get("ended_at")) if r.get("ended_at") else None,
+        }
+    return {
+        "sched": sched,
+        "budget_used": used,
+        "budget_cap": X_MONTHLY_API_BUDGET,
+        "budget_remaining": max(0, X_MONTHLY_API_BUDGET - used),
+        "cost_this_month": cost["total_this_month_usd"],
+        "last_run": last_run,
+    }
+
+
+@router.get("/dashboard/x/_run-agent", response_class=HTMLResponse)
+def x_run_agent(request: Request, db: XDatabase = Depends(get_x_db)):
+    return templates.TemplateResponse(request, "_x_run_agent.html", _x_run_agent_context(db))
+
+
+@router.post("/dashboard/x/_run-agent", response_class=HTMLResponse)
+def x_run_agent_trigger(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: XDatabase = Depends(get_x_db),
+):
+    """HTML wrapper over the JSON POST /api/x/run-now (single source of guard +
+    start logic). Returns the polling partial on 202, or a red banner on
+    409/429 — HTMX can't render the JSON API's body/4xx directly. The JSON
+    /api/x/run-now still exists for Render Cron. post_enabled stays False."""
+    from api.routers.x import run_now as x_run_now
+    try:
+        result = x_run_now(background_tasks, db=db)
+    except HTTPException as exc:
+        d = exc.detail if isinstance(exc.detail, dict) else {"reason": str(exc.detail)}
+        if exc.status_code == 409:
+            msg = f"Already running (run_id={d.get('run_id')})."
+        elif exc.status_code == 429:
+            msg = (f"Would exceed monthly budget "
+                   f"(used {d.get('current_calls')}/{d.get('monthly_budget')}, "
+                   f"this run needs up to {d.get('requested_max')}).")
+        else:
+            msg = str(d)
+        return HTMLResponse(f'<div id="x-run-status" class="status status-error">{msg}</div>')
+
+    ctx = {
+        "run_id": result["run_id"], "status": "running", "terminal": False,
+        "just_started": True, "posts_fetched": 0, "posts_classified": 0,
+        "api_calls": 0, "error_message": None,
+    }
+    return templates.TemplateResponse(request, "_x_run_status.html", ctx)
+
+
+@router.get("/dashboard/x/_run-status/{run_id}", response_class=HTMLResponse)
+def x_run_status_partial(request: Request, run_id: int, db: XDatabase = Depends(get_x_db)):
+    """HTML poller. While 'running' it self-refreshes every 5s; on a terminal
+    state it drops the trigger (polling stops) and refreshes the KPI strip."""
+    run = db.get_run(run_id)
+    if not run:
+        return HTMLResponse(
+            f'<div id="x-run-status" class="status status-error">Run {run_id} not found.</div>'
+        )
+    status = run.get("status")
+    ctx = {
+        "run_id": run_id,
+        "status": status,
+        "terminal": status in ("completed", "completed_partial", "failed", "cancelled"),
+        "just_started": False,
+        "posts_fetched": run.get("records_new") or 0,
+        "posts_classified": run.get("records_updated") or 0,
+        "api_calls": run.get("calls_used") or 0,
+        "error_message": run.get("error_message"),
+    }
+    return templates.TemplateResponse(request, "_x_run_status.html", ctx)

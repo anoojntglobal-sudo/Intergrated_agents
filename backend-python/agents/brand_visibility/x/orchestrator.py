@@ -72,105 +72,191 @@ def save_tick_state(tick_number: int) -> None:
 # Tick logic
 # ---------------------------------------------------------------------------
 
-def tick(tick_number: int, mode: str = "all", dry_run: bool = False) -> dict:
-    from agents.brand_visibility.x.db import Database
-    from agents.brand_visibility.x.x_scraper import expand_reply_trees, sweep_influencers, sweep_keywords
-    from agents.brand_visibility.x.post_drafter import cluster_themes, draft_posts_for_new_themes
+def run_sweep(db, run_id: int, config: dict, post_enabled: bool = False) -> dict:
+    """API-friendly sweep entry (Sub-phase X5). Caller pre-creates the agent_runs
+    row (run_id) and owns the Database (so it can set sync_interval=None for WAL
+    safety) and the final finish_run() call.
+
+    config matches db.get_schedule(): mode, sweep_type, max_pages, max_keywords,
+    class_filter, since_hours, max_api_calls (+ optional dry_run for the CLI).
+
+    post_enabled gates the content-drafting phases (cluster/draft). It defaults
+    False and the API layer NEVER sets it True, so run-now is scrape+classify
+    only — no OpenRouter drafting, and (there is no X-posting code anywhere) no
+    posting. The flag exists solely to preserve CLI drafting via tick().
+
+    Phase order matches the legacy tick(): keywords -> influencers -> classify ->
+    reply_trees -> (cluster/draft). Progress is written to agent_runs as it goes.
+    Returns {posts_fetched, posts_classified, keywords_queried, api_calls_used,
+    errors, status, summary}; status is 'completed' or 'completed_partial' (API
+    budget exhausted). Phase exceptions are caught and counted; the caller wraps
+    the whole thing to record a 'failed' status on an unhandled error.
+    """
+    from agents.brand_visibility.x.x_scraper import (
+        expand_reply_trees, sweep_influencers, sweep_keywords,
+        reset_call_budget, _budget_ok,
+    )
     from agents.brand_visibility.x.classifier import classify_pending
 
-    start = datetime.now(timezone.utc)
-    logger.info("=== Tick %d start (%s) dry_run=%s mode=%s ===", tick_number, start.isoformat(), dry_run, mode)
+    mode = config.get("mode") or "all"
+    dry_run = bool(config.get("dry_run", False))
+    max_api_calls = int(config.get("max_api_calls") or 12)
+    max_keywords = config.get("max_keywords")  # None = no keyword cap (CLI default)
 
+    # Thread per-sweep config to the scraper, which reads these env vars at
+    # provider-call time (least-invasive — x_scraper is unchanged).
+    os.environ["KA017_SWEEP_TYPE"] = str(config.get("sweep_type") or "Latest")
+    os.environ["KA017_MAX_PAGES"] = str(config.get("max_pages") or 1)
+    os.environ["KA017_CLASS_FILTER"] = str(config.get("class_filter") or "")
+    since_hours = config.get("since_hours")
+    if since_hours is not None and str(since_hours).strip() != "":
+        os.environ["KA017_SINCE_HOURS"] = str(since_hours)
+    else:
+        os.environ.pop("KA017_SINCE_HOURS", None)
+
+    reset_call_budget(max_api_calls)
+    start = datetime.now(timezone.utc)
+    logger.info("=== run_sweep run_id=%s start (%s) mode=%s dry_run=%s budget=%d ===",
+                run_id, start.isoformat(), mode, dry_run, max_api_calls)
+
+    summary: dict[str, object] = {
+        "run_id": run_id, "mode": mode, "start": start.isoformat(),
+        "config": {k: config.get(k) for k in (
+            "mode", "sweep_type", "max_pages", "max_keywords",
+            "class_filter", "since_hours", "max_api_calls")},
+    }
+    total_new = 0
+    total_calls = 0
+    keywords_queried = 0
+    posts_classified = 0
+    errors = 0
+
+    if mode in ("all", "keywords"):
+        try:
+            st = sweep_keywords(db, dry_run=dry_run, limit=max_keywords, run_id=run_id)
+            summary["keywords"] = st
+            total_new += st.get("new", 0)
+            total_calls += st.get("api_calls", 0)
+            keywords_queried += st.get("api_calls", 0)  # 1 keyword query == 1 API call
+        except Exception:
+            logger.exception("run_sweep: sweep_keywords failed")
+            errors += 1
+        db.update_run(run_id, records_new=total_new, calls_used=total_calls)
+
+    if mode in ("all", "influencers"):
+        try:
+            st = sweep_influencers(db, tick_number=0, dry_run=dry_run, run_id=run_id)
+            summary["influencers"] = st
+            total_new += st.get("new", 0)
+            total_calls += st.get("api_calls", 0)
+        except Exception:
+            logger.exception("run_sweep: sweep_influencers failed")
+            errors += 1
+        db.update_run(run_id, records_new=total_new, calls_used=total_calls)
+
+    if mode in ("all", "classify"):
+        try:
+            st = classify_pending(db, limit=50, dry_run=dry_run)
+            summary["classify"] = st
+            posts_classified = st.get("classified", 0)
+        except Exception:
+            logger.exception("run_sweep: classify_pending failed")
+            errors += 1
+        db.update_run(run_id, records_updated=posts_classified)
+
+    if mode in ("all", "reply_trees"):
+        try:
+            st = expand_reply_trees(db, dry_run=dry_run, run_id=run_id)
+            summary["reply_trees"] = st
+            total_new += st.get("reply_tweets", 0)
+            total_calls += st.get("api_calls", 0)
+        except Exception:
+            logger.exception("run_sweep: expand_reply_trees failed")
+            errors += 1
+        db.update_run(run_id, records_new=total_new, calls_used=total_calls)
+
+    # Content drafting (cluster/draft) — generates draft text via OpenRouter into
+    # content_themes for human review. NEVER posts to X. Gated by post_enabled,
+    # which the API run-now path never sets True (CLI parity only).
+    if post_enabled and mode in ("all", "cluster", "draft"):
+        from agents.brand_visibility.x.post_drafter import cluster_themes, draft_posts_for_new_themes
+        if mode in ("all", "cluster"):
+            try:
+                themes = cluster_themes(db)
+                summary["themes_clustered"] = len(themes)
+            except Exception:
+                logger.exception("run_sweep: cluster_themes failed")
+                errors += 1
+        if mode in ("all", "draft"):
+            try:
+                summary["drafts"] = draft_posts_for_new_themes(db, dry_run=dry_run)
+            except Exception:
+                logger.exception("run_sweep: draft_posts_for_new_themes failed")
+                errors += 1
+
+    end = datetime.now(timezone.utc)
+    summary["end"] = end.isoformat()
+    summary["duration_seconds"] = round((end - start).total_seconds(), 1)
+    summary["keywords_queried"] = keywords_queried
+    status = "completed_partial" if (not dry_run and not _budget_ok()) else "completed"
+    stats = {
+        "posts_fetched": total_new,
+        "posts_classified": posts_classified,
+        "keywords_queried": keywords_queried,
+        "api_calls_used": total_calls,
+        "errors": errors,
+        "status": status,
+        "summary": summary,
+    }
+    logger.info("=== run_sweep run_id=%s %s in %.1fs | fetched=%d classified=%d calls=%d errors=%d ===",
+                run_id, status, summary["duration_seconds"], total_new, posts_classified, total_calls, errors)
+    return stats
+
+
+def tick(tick_number: int, mode: str = "all", dry_run: bool = False) -> dict:
+    """CLI/legacy entry — preserved. Thin wrapper that builds a config from the
+    env vars / settings the CLI already populates, then delegates to run_sweep().
+    Owns the Database + start_run/finish_run lifecycle, exactly as before."""
+    from agents.brand_visibility.x.db import Database
     from shared.config.settings import MAX_API_CALLS_PER_RUN
-    from agents.brand_visibility.x.x_scraper import reset_call_budget
+
     db = Database()
-    reset_call_budget(MAX_API_CALLS_PER_RUN)
     run_id = db.start_run(mode=mode, triggered_by="orchestrator")
     db.log_activity(run_id, phase="orchestrator", event="tick_start",
                     message=f"tick={tick_number} dry_run={dry_run} budget={MAX_API_CALLS_PER_RUN}")
 
-    summary: dict[str, object] = {"tick": tick_number, "start": start.isoformat()}
-    total_calls = 0
-    total_new = 0
+    config = {
+        "mode": mode,
+        "sweep_type": os.environ.get("KA017_SWEEP_TYPE", "Latest"),
+        "max_pages": int(os.environ.get("KA017_MAX_PAGES", "1") or 1),
+        "class_filter": os.environ.get("KA017_CLASS_FILTER", ""),
+        "since_hours": os.environ.get("KA017_SINCE_HOURS") or None,
+        "max_api_calls": MAX_API_CALLS_PER_RUN,
+        "max_keywords": None,                 # CLI: no keyword cap (legacy behavior)
+        "dry_run": dry_run,
+    }
+    # Preserve legacy drafting cadence: every tick for explicit cluster/draft
+    # modes, else once per ~day on the 'all' loop. The API never enables this.
+    post_enabled = mode in ("cluster", "draft") or (
+        mode == "all" and tick_number % CONTENT_DRAFT_EVERY_N_TICKS == 0
+    )
 
     try:
-        if mode in ("all", "keywords"):
-            try:
-                stats = sweep_keywords(db, dry_run=dry_run, run_id=run_id)
-                summary["keywords"] = stats
-                total_calls += stats.get("api_calls", 0)
-                total_new += stats.get("new", 0)
-            except Exception:
-                logger.exception("sweep_keywords failed")
-
-        if mode in ("all", "influencers"):
-            try:
-                stats = sweep_influencers(db, tick_number=tick_number, dry_run=dry_run, run_id=run_id)
-                summary["influencers"] = stats
-                total_calls += stats.get("api_calls", 0)
-                total_new += stats.get("new", 0)
-            except Exception:
-                logger.exception("sweep_influencers failed")
-
-        if mode in ("all", "classify"):
-            try:
-                stats = classify_pending(db, limit=50, dry_run=dry_run)
-                summary["classify"] = stats
-            except Exception:
-                logger.exception("classify_pending failed")
-
-        if mode in ("all", "reply_trees"):
-            try:
-                stats = expand_reply_trees(db, dry_run=dry_run, run_id=run_id)
-                summary["reply_trees"] = stats
-                total_calls += stats.get("api_calls", 0)
-                total_new += stats.get("reply_tweets", 0)
-            except Exception:
-                logger.exception("expand_reply_trees failed")
-
-        if mode in ("all", "cluster", "draft") and (
-            tick_number % CONTENT_DRAFT_EVERY_N_TICKS == 0 or mode in ("cluster", "draft")
-        ):
-            if mode in ("all", "cluster"):
-                try:
-                    themes = cluster_themes(db)
-                    summary["themes_clustered"] = len(themes)
-                except Exception:
-                    logger.exception("cluster_themes failed")
-
-            if mode in ("all", "draft"):
-                try:
-                    stats = draft_posts_for_new_themes(db, dry_run=dry_run)
-                    summary["drafts"] = stats
-                except Exception:
-                    logger.exception("draft_posts_for_new_themes failed")
-
-        end = datetime.now(timezone.utc)
-        duration = (end - start).total_seconds()
-        summary["end"] = end.isoformat()
-        summary["duration_seconds"] = round(duration, 1)
-
-        db.finish_run(run_id, status="completed",
-                      calls_used=total_calls,
-                      records_new=total_new,
-                      summary=summary)
-
+        stats = run_sweep(db, run_id, config, post_enabled=post_enabled)
+        db.finish_run(run_id, status=stats["status"],
+                      calls_used=stats["api_calls_used"],
+                      records_new=stats["posts_fetched"],
+                      records_updated=stats["posts_classified"],
+                      summary=stats["summary"])
     except Exception as exc:
-        end = datetime.now(timezone.utc)
-        summary["end"] = end.isoformat()
-        summary["duration_seconds"] = round((end - start).total_seconds(), 1)
-        db.finish_run(run_id, status="failed",
-                      calls_used=total_calls,
-                      records_new=total_new,
-                      error_message=str(exc),
-                      summary=summary)
+        logger.exception("tick %d failed", tick_number)
+        db.finish_run(run_id, status="failed", error_message=str(exc),
+                      summary={"tick": tick_number, "error": str(exc)})
         raise
     finally:
         db.log_activity(run_id, phase="orchestrator", event="tick_end")
 
-    logger.info("=== Tick %d done in %.1f s | %s ===",
-                tick_number, summary["duration_seconds"], summary)
-    return summary
+    return stats["summary"]
 
 
 # ---------------------------------------------------------------------------

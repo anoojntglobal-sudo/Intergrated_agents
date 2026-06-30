@@ -41,13 +41,12 @@ _FALLBACK_PROMPT = (
 )
 
 
-def _load_system_prompt() -> str:
-    """Read the active classifier prompt from disk.
+def _load_prompt_from_file() -> str:
+    """Read the active classifier prompt from disk (the X3 fallback path).
 
-    Looks up config/prompts/active.txt to find the active prompt name,
-    then reads config/prompts/<name>.txt. Returns a minimal fallback if
-    either file is missing. Read fresh on every call so the next batch
-    picks up any edits saved through the dashboard.
+    Looks up config/prompts/active.txt to find the active prompt name, then reads
+    config/prompts/<name>.txt. Returns the built-in minimal fallback if either
+    file is missing.
     """
     try:
         if not _ACTIVE_POINTER.exists():
@@ -63,8 +62,34 @@ def _load_system_prompt() -> str:
             return _FALLBACK_PROMPT
         return prompt_path.read_text(encoding="utf-8")
     except Exception as exc:
-        logger.exception("Failed to load system prompt; using fallback: %s", exc)
+        logger.exception("Failed to load system prompt from file; using fallback: %s", exc)
         return _FALLBACK_PROMPT
+
+
+def _load_system_prompt(db: "Database | None" = None) -> str:
+    """Return the active classifier prompt (Sub-phase X3: DB-first).
+
+    Primary source is the DB (db.get_active_prompt(), which itself falls back to
+    the file). If no db is supplied, one is created (skip_schema_init). On any DB
+    failure or empty content, falls back to reading the file directly, then to a
+    built-in minimal prompt. NEVER returns None/empty — classification must not
+    silently break on a prompt-load issue.
+    """
+    try:
+        if db is None:
+            from agents.brand_visibility.x.db import Database as _DB
+            db = _DB(skip_schema_init=True)
+        record = db.get_active_prompt() or {}
+        content = record.get("content") or ""
+        if content.strip():
+            return content
+        logger.warning(
+            "Active prompt content empty (version=%s); falling back to file",
+            record.get("version"),
+        )
+    except Exception as exc:
+        logger.warning("DB prompt load failed (%s); falling back to file", exc)
+    return _load_prompt_from_file()
 
 
 class ClassifierOutput(BaseModel):
@@ -183,6 +208,11 @@ def classify_pending(
 
     pending = db.get_unclassified(limit=limit)
 
+    # Load the active prompt ONCE per batch from the DB (X3), reusing this db
+    # handle — avoids a per-tweet DB connect and picks up dashboard edits between
+    # batches. _load_system_prompt never returns empty (file/built-in fallback).
+    system_prompt = _load_system_prompt(db)
+
     for row in pending:
         # Normalise sqlite3.Row or plain sequence to dict
         if hasattr(row, "keys"):
@@ -197,7 +227,7 @@ def classify_pending(
             stats["skipped"] += 1
             continue
 
-        result = classify_one(tweet)
+        result = classify_one(tweet, system_prompt)
 
         if result is None:
             stats["skipped"] += 1
