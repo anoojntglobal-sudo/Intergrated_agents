@@ -1,24 +1,9 @@
 import { Link } from 'react-router-dom';
 import PlatformShell from '../components/PlatformShell';
+import { SECTIONS, sectionStatus } from '../agentsConfig';
 
-const OPTIONS = [
-  {
-    to: '/brand', icon: '◎', title: 'Brand Visibility Agent', status: 'live', statusLabel: 'Active',
-    desc: 'Gets your product discovered. The agent joins the right conversations in your field, finds where your product fits, and surfaces it to the people who need it — starting with X, expanding across platforms.',
-    cta: 'Open agent',
-  },
-  {
-    to: '/pr', icon: '◇', title: 'PR Agent', status: 'soon', statusLabel: 'Coming soon',
-    desc: 'Finds the accounts that move your reputation — creators open to paid promotion and the voices that publish genuine, credible reviews of your product.',
-    cta: 'Preview',
-  },
-  {
-    to: '/leaderboard', icon: '△', title: 'Leaderboard Agent', status: 'soon', statusLabel: 'Coming soon',
-    desc: 'A live leaderboard of the top products and applications in your field — so you always know the landscape and exactly where you stand.',
-    cta: 'Preview',
-  },
-];
-
+// Renders one card per section from the registry (agentsConfig.js).
+// A section shows "Active" as soon as any agent in it is live.
 export default function LandingPage() {
   return (
     <PlatformShell>
@@ -30,15 +15,18 @@ export default function LandingPage() {
         Choose an agent to begin.
       </p>
       <div className="agent-grid">
-        {OPTIONS.map((o, i) => (
-          <Link key={o.to} to={o.to} className="agent-option-card" style={{ animationDelay: `${i * 90}ms` }}>
-            <div className="aoc-icon">{o.icon}</div>
-            <div className="aoc-title">{o.title}</div>
-            <div className="aoc-desc">{o.desc}</div>
-            <span className={`aoc-status ${o.status}`}>{o.statusLabel}</span>
-            <span className="aoc-cta">{o.cta} →</span>
-          </Link>
-        ))}
+        {SECTIONS.map((s, i) => {
+          const live = sectionStatus(s.id) === 'live';
+          return (
+            <Link key={s.id} to={s.to} className="agent-option-card" style={{ animationDelay: `${i * 90}ms` }}>
+              <div className="aoc-icon">{s.icon}</div>
+              <div className="aoc-title">{s.title}</div>
+              <div className="aoc-desc">{s.desc}</div>
+              <span className={`aoc-status ${live ? 'live' : 'soon'}`}>{live ? 'Active' : 'Coming soon'}</span>
+              <span className="aoc-cta">{live ? 'Open agent' : 'Preview'} →</span>
+            </Link>
+          );
+        })}
       </div>
     </PlatformShell>
   );

@@ -1,7 +1,8 @@
 import { Link } from 'react-router-dom';
 import PlatformShell from '../components/PlatformShell';
+import { byId } from '../agentsConfig';
 
-const DASHBOARD_URL = 'https://kiteai-brand-visibility-py.onrender.com/dashboard/linkedin?embedded=true';
+const DASHBOARD_URL = byId('brand-linkedin').embedUrl;
 
 export default function LinkedinAgentPage() {
   return (

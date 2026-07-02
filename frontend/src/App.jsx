@@ -9,6 +9,7 @@ import BrandVisibilityPage  from './pages/BrandVisibilityPage';
 import LinkedinAgentPage    from './pages/LinkedinAgentPage';
 import XAgentPage           from './pages/XAgentPage';
 import PRAgentPage          from './pages/PRAgentPage';
+import AgentEmbedPage       from './pages/AgentEmbedPage';
 import LeaderboardAgentPage from './pages/LeaderboardAgentPage';
 import Dashboard      from './pages/Dashboard';
 import AgentRunner    from './pages/AgentRunner';
@@ -63,6 +64,7 @@ export default function App() {
       <Route path="/brand/linkedin" element={<ProtectedRoute><LinkedinAgentPage /></ProtectedRoute>} />
       <Route path="/brand/x"     element={<ProtectedRoute><XAgentPage /></ProtectedRoute>} />
       <Route path="/pr"          element={<ProtectedRoute><PRAgentPage /></ProtectedRoute>} />
+      <Route path="/a/:id"       element={<ProtectedRoute><AgentEmbedPage /></ProtectedRoute>} />
       <Route path="/leaderboard" element={<ProtectedRoute><LeaderboardAgentPage /></ProtectedRoute>} />
 
       {/* X Agent dashboard (everything else, with sidebar) */}

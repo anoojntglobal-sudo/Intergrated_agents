@@ -1,28 +1,11 @@
 import { Link, useNavigate } from 'react-router-dom';
 import PlatformShell from '../components/PlatformShell';
+import { bySection } from '../agentsConfig';
 
-const PLATFORM_AGENTS = [
-  {
-    icon: '𝕏', title: 'X Agent', status: 'live', statusLabel: 'Active',
-    to: '/brand/x',
-    desc: 'Voice AI builder conversations on X — discovers builders in real time, classifies threads, and tracks signal across the firehose.',
-    cta: 'Open dashboard',
-  },
-  {
-    icon: 'in', title: 'LinkedIn Agent', status: 'live', statusLabel: 'Active',
-    to: '/brand/linkedin',
-    desc: 'Voice AI builder signals from LinkedIn — discovers technical talent, surfaces relevant conversations, and tracks the field across the professional graph.',
-    cta: 'Open dashboard',
-  },
-  {
-    icon: '⋯', title: 'More platforms', status: 'soon', statusLabel: 'Planned', to: null,
-    desc: 'Reddit, YouTube and more — each new platform plugs into the same brand-visibility agent, so you can run everywhere your audience already is.',
-    cta: 'Planned',
-  },
-];
-
+// Renders the Brand Visibility platform agents from the registry (agentsConfig.js).
 export default function BrandVisibilityPage() {
   const navigate = useNavigate();
+  const agents = bySection('brand');
   return (
     <PlatformShell>
       <Link to="/" className="back-to-platform">← All agents</Link>
@@ -33,20 +16,20 @@ export default function BrandVisibilityPage() {
         LinkedIn and other platforms run on the same engine and arrive next.
       </p>
       <div className="agent-grid">
-        {PLATFORM_AGENTS.map((a, i) => {
-          const cls = `agent-option-card${a.to ? '' : ' disabled'}`;
+        {agents.map((a, i) => {
+          const cls = `agent-option-card${a.route ? '' : ' disabled'}`;
           const inner = (
             <>
               <div className="aoc-icon">{a.icon}</div>
               <div className="aoc-title">{a.title}</div>
               <div className="aoc-desc">{a.desc}</div>
-              <span className={`aoc-status ${a.status}`}>{a.statusLabel}</span>
-              <span className="aoc-cta">{a.cta} {a.to ? '→' : ''}</span>
+              <span className={`aoc-status ${a.status}`}>{a.status === 'live' ? 'Active' : 'Planned'}</span>
+              <span className="aoc-cta">{a.cta} {a.route ? '→' : ''}</span>
             </>
           );
-          return a.to
-            ? <div key={a.title} className={cls} style={{ animationDelay: `${i * 90}ms` }} onClick={() => navigate(a.to)}>{inner}</div>
-            : <div key={a.title} className={cls} style={{ animationDelay: `${i * 90}ms` }}>{inner}</div>;
+          return a.route
+            ? <div key={a.id} className={cls} style={{ animationDelay: `${i * 90}ms` }} onClick={() => navigate(a.route)}>{inner}</div>
+            : <div key={a.id} className={cls} style={{ animationDelay: `${i * 90}ms` }}>{inner}</div>;
         })}
       </div>
     </PlatformShell>

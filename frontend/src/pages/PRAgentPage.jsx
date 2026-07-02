@@ -1,25 +1,26 @@
 import { Link } from 'react-router-dom';
 import PlatformShell from '../components/PlatformShell';
+import { byId } from '../agentsConfig';
 
-// Placeholder section. Reserved for the PR Agent to be plugged into the platform.
+// PR Agent — embeds your deployed "X Influencer & PR" agent (URL from the registry).
 export default function PRAgentPage() {
+  const agent = byId('pr-x');
   return (
     <PlatformShell>
       <Link to="/" className="back-to-platform">← All agents</Link>
       <div className="shell-eyebrow">PR Agent</div>
       <h1 className="shell-h1">Reach the voices that <span className="accent">shape your reputation</span></h1>
       <p className="shell-sub">
-        Finds the accounts that matter for PR — creators open to paid promotion and the people who
-        publish genuine, credible reviews of your product.
+        Finds the accounts that move your reputation on X — creators open to paid promotion and the
+        voices that publish genuine, credible reviews of your product. Embedded dashboard below.
       </p>
-      <div className="placeholder-wrap">
-        <div className="aoc-icon">◇</div>
-        <h2>Coming soon</h2>
-        <p>
-          This agent is being prepared and will appear here once connected. It plugs into the same
-          KiteAI platform you’re using now — same login, same workspace.
-        </p>
-        <span className="aoc-status soon">In progress</span>
+      <div className="x-iframe-wrap">
+        <iframe
+          src={agent.embedUrl}
+          title="PR Agent Dashboard"
+          className="x-iframe"
+          allow="clipboard-write"
+        />
       </div>
     </PlatformShell>
   );
