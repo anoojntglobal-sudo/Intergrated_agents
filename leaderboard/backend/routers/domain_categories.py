@@ -1,17 +1,15 @@
-import os
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from database import get_db
 from models import DomainCategory, Leaderboard
 
 router = APIRouter(tags=["domain-categories"])
 
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
-
-def verify_admin(x_admin_password: str = Header(...)):
-    if x_admin_password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid admin password")
+def verify_admin(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=403, detail="Not authenticated")
 
 
 def category_to_dict(cat: DomainCategory, db: Session) -> dict:
