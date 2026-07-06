@@ -11,6 +11,7 @@ those can be added without restructuring.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -73,12 +74,19 @@ _STATIC_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="Brand Visibility Agent API", version=API_VERSION, lifespan=lifespan)
 
-# CORS: wide open for now. Tighten allow_origins to the teammate's React URL once
-# known. allow_credentials stays False because credentials are incompatible with
-# the "*" wildcard origin (and there's no auth yet).
+# CORS: origins come from ALLOWED_ORIGINS (comma-separated) env var, defaulting
+# to "*" — so local dev (Vite on :5173) and the current Vercel embed both work
+# unchanged. Set an explicit list to tighten (planned for the Railway migration),
+# e.g. ALLOWED_ORIGINS="http://localhost:5173,https://your-app.vercel.app".
+# allow_credentials stays False — incompatible with the "*" wildcard, no cookie auth.
+_origins_env = os.getenv("ALLOWED_ORIGINS", "*").strip()
+_allowed_origins = (
+    ["*"] if _origins_env in ("", "*")
+    else [o.strip() for o in _origins_env.split(",") if o.strip()]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
