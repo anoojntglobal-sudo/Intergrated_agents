@@ -9,19 +9,24 @@
 // up automatically once it's listed here.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Python dashboard base — set VITE_PYTHON_URL in .env.local for local
+// dev (http://localhost:8000). Falls back to the Render deployment when
+// unset (production / Vercel), so nothing breaks without the env var.
+const PY_BASE = import.meta.env.VITE_PYTHON_URL || 'https://kiteai-brand-visibility-py.onrender.com';
+
 export const AGENTS = [
   // ── Brand Visibility — teammate (Anooj): Python dashboards on Render ──
   {
     id: 'brand-x', section: 'brand', title: 'X Agent', icon: '𝕏',
     status: 'live', route: '/brand/x',
-    embedUrl: 'https://kiteai-brand-visibility-py.onrender.com/dashboard/x?embedded=true',
+    embedUrl: `${PY_BASE}/dashboard/x?embedded=true`,
     desc: 'Voice AI builder conversations on X — discovers builders in real time, classifies threads, and tracks signal across the firehose.',
     cta: 'Open dashboard',
   },
   {
     id: 'brand-linkedin', section: 'brand', title: 'LinkedIn Agent', icon: 'in',
     status: 'live', route: '/brand/linkedin',
-    embedUrl: 'https://kiteai-brand-visibility-py.onrender.com/dashboard/linkedin?embedded=true',
+    embedUrl: `${PY_BASE}/dashboard/linkedin?embedded=true`,
     desc: 'Voice AI builder signals from LinkedIn — discovers technical talent, surfaces relevant conversations, and tracks the field across the professional graph.',
     cta: 'Open dashboard',
   },
