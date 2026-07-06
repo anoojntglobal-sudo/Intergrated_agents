@@ -88,9 +88,11 @@ class UpdateScheduleRequest(BaseModel):
 
 def get_x_db() -> Database:
     """One X Database per request. skip_schema_init=True: the X tables already
-    exist in Turso, so dashboard reads never replay schema DDL (mirrors the
-    LinkedIn get_db dependency)."""
-    return Database(skip_schema_init=True)
+    exist in Turso, so dashboard reads never replay schema DDL.
+    sync_interval=None: read-only requests sync once at connection open; no
+    background sync mid-request. Prevents WAL conflicts with the concurrent
+    run-now background task (which also uses sync_interval=None)."""
+    return Database(skip_schema_init=True, sync_interval=None)
 
 
 @router.get("/stats")
