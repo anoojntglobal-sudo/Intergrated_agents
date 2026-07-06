@@ -13,7 +13,7 @@ import logging
 import os
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from agents.brand_visibility.x.db import Database
@@ -25,6 +25,10 @@ logger = logging.getLogger("uvicorn.error")
 # Monthly RapidAPI scrape-call cap for run-now's budget guard. Default 5000
 # (twitter-api45 paid-plan capacity). Override via env if the plan changes.
 X_MONTHLY_API_BUDGET = int(os.getenv("X_MONTHLY_API_BUDGET", "5000"))
+
+# Shared secret between the GitHub Actions cron and this service. Read once at
+# module load. run-now requires the X-Cron-Secret header to match it.
+_X_CRON_SECRET = os.getenv("X_CRON_SECRET")
 
 
 def _run_sweep_task(run_id: int, config: dict) -> None:
@@ -151,12 +155,12 @@ def update_schedule(payload: UpdateScheduleRequest, db: Database = Depends(get_x
         raise HTTPException(status_code=422, detail=str(exc))
 
 
-@router.post("/run-now", status_code=202)
-def run_now(background_tasks: BackgroundTasks, db: Database = Depends(get_x_db)) -> dict:
-    """Trigger a sweep with the current schedule config (Sub-phase X5).
-    Scrape+classify ONLY (post_enabled is never True). Guards:
-      409 if a run is already 'running'; 429 if this run could exceed the monthly
-    scrape-call budget. Returns 202 + run_id; work happens in a background task."""
+def _start_x_run(background_tasks: BackgroundTasks, db: Database) -> dict:
+    """Guards + start logic for a run-now sweep (Sub-phase X5). Trusted internal
+    entry with NO auth — shared by the public run_now endpoint (which adds the
+    X-Cron-Secret check) and the dashboard wrapper (server-side, already trusted).
+    Scrape+classify ONLY (post_enabled never True). Raises 409 if a run is
+    already 'running', 429 if it could exceed the monthly scrape-call budget."""
     existing = db.get_running_run()
     if existing:
         raise HTTPException(status_code=409, detail={
@@ -182,6 +186,27 @@ def run_now(background_tasks: BackgroundTasks, db: Database = Depends(get_x_db))
     logger.info("run-now accepted: run_id=%s mode=%s budget=%s",
                 run_id, schedule.get("mode"), requested)
     return {"run_id": run_id, "status": "started"}
+
+
+@router.post("/run-now", status_code=202)
+def run_now(
+    background_tasks: BackgroundTasks,
+    db: Database = Depends(get_x_db),
+    x_cron_secret: str | None = Header(None, alias="X-Cron-Secret"),
+) -> dict:
+    """Public run-now endpoint (GitHub Actions cron + any external caller).
+    Requires the X-Cron-Secret header to match the X_CRON_SECRET env var, then
+    delegates to _start_x_run. 500 if the secret isn't configured server-side,
+    401 if the header is missing or wrong."""
+    if not _X_CRON_SECRET:
+        raise HTTPException(status_code=500, detail={
+            "reason": "server_misconfigured",
+            "message": "X_CRON_SECRET env var not set on server",
+        })
+    if x_cron_secret != _X_CRON_SECRET:
+        raise HTTPException(status_code=401, detail={"reason": "invalid_cron_secret"})
+
+    return _start_x_run(background_tasks, db)
 
 
 @router.get("/run-status/{run_id}")

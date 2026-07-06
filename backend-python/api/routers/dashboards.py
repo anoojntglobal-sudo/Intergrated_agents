@@ -675,9 +675,11 @@ def x_run_agent_trigger(
     start logic). Returns the polling partial on 202, or a red banner on
     409/429 — HTMX can't render the JSON API's body/4xx directly. The JSON
     /api/x/run-now still exists for Render Cron. post_enabled stays False."""
-    from api.routers.x import run_now as x_run_now
+    # Trusted server-internal caller — invoke the shared helper directly, so it
+    # bypasses the X-Cron-Secret auth that guards the public /api/x/run-now.
+    from api.routers.x import _start_x_run
     try:
-        result = x_run_now(background_tasks, db=db)
+        result = _start_x_run(background_tasks, db)
     except HTTPException as exc:
         d = exc.detail if isinstance(exc.detail, dict) else {"reason": str(exc.detail)}
         if exc.status_code == 409:
