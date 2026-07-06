@@ -4,11 +4,11 @@ import AmbientCanvas from './AmbientCanvas';
 
 // Full-screen platform shell (ambient bg + topbar + content) used by the
 // landing + agent-section pages.
-export default function PlatformShell({ children }) {
+export default function PlatformShell({ children, fullBleed = false }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   return (
-    <div className="platform-shell">
+    <div className={`platform-shell ${fullBleed ? 'platform-shell--full-bleed' : ''}`}>
       <AmbientCanvas />
       <div className="ambient-grid" aria-hidden="true" />
 
@@ -24,7 +24,7 @@ export default function PlatformShell({ children }) {
         </div>
       </div>
 
-      <div className="shell-main">{children}</div>
+      <div className={`shell-main ${fullBleed ? 'shell-main--full-bleed' : ''}`}>{children}</div>
     </div>
   );
 }

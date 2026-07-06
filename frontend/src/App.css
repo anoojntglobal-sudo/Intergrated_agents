@@ -890,3 +890,87 @@ code, .mono, pre { font-family: var(--mono); }
   display: block;
   background: transparent;
 }
+
+/* ── Platform shell — full-bleed mode for iframe pages ───────────────── */
+.platform-shell--full-bleed .shell-main--full-bleed {
+  max-width: none;
+  padding: 16px 24px 24px;
+}
+
+/* Compact header bar replaces the verbose eyebrow + h1 + sub chrome */
+.iframe-page-header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 6px 0 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+.iframe-page-header .back-to-platform {
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+.iframe-page-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.iframe-page-eyebrow {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--primary);
+}
+.iframe-page-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.iframe-open-external {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .04em;
+  color: var(--text2);
+  text-decoration: none;
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-control);
+  transition: .15s;
+}
+.iframe-open-external:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* Override iframe wrap height calculation when in full-bleed mode.
+   The compact header is ~50px tall (vs ~250px for verbose chrome),
+   so iframe can take much more viewport. */
+.platform-shell--full-bleed .linkedin-iframe-wrap,
+.platform-shell--full-bleed .x-iframe-wrap {
+  margin-top: 0;
+  min-height: calc(100vh - 180px);
+  /* 180px = topbar (~57px) + shell-main padding-top (16px) + header
+     bar with border (~50px) + iframe wrap border + breathing room */
+}
+.platform-shell--full-bleed .linkedin-iframe,
+.platform-shell--full-bleed .x-iframe {
+  height: calc(100vh - 180px);
+}
+
+/* Mobile: collapse header to two lines if needed */
+@media (max-width: 720px) {
+  .iframe-page-header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .iframe-page-title { width: 100%; order: 2; }
+  .back-to-platform { order: 1; }
+  .iframe-open-external { order: 3; }
+}
