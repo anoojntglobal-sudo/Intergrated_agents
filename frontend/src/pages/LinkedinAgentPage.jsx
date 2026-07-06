@@ -6,14 +6,17 @@ const DASHBOARD_URL = byId('brand-linkedin').embedUrl;
 
 export default function LinkedinAgentPage() {
   return (
-    <PlatformShell>
-      <Link to="/brand" className="back-to-platform">← Brand Visibility</Link>
-      <div className="shell-eyebrow">LinkedIn Agent</div>
-      <h1 className="shell-h1">Voice AI builder signals <span className="accent">on LinkedIn</span></h1>
-      <p className="shell-sub">
-        Real-time scraping, classification, and prioritization of LinkedIn posts mentioning voice AI infrastructure.
-        103 posts classified across 4 tiers. Embedded dashboard below.
-      </p>
+    <PlatformShell fullBleed>
+      <div className="iframe-page-header">
+        <Link to="/brand" className="back-to-platform">← Brand Visibility</Link>
+        <div className="iframe-page-title">
+          <span className="iframe-page-eyebrow">LinkedIn Agent</span>
+          <span className="iframe-page-name">Voice AI builder signals on LinkedIn</span>
+        </div>
+        <a href={DASHBOARD_URL.replace('?embedded=true', '')} target="_blank" rel="noreferrer" className="iframe-open-external">
+          Open in new tab ↗
+        </a>
+      </div>
       <div className="linkedin-iframe-wrap">
         <iframe
           src={DASHBOARD_URL}

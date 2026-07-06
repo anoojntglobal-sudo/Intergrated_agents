@@ -6,14 +6,17 @@ const DASHBOARD_URL = byId('brand-x').embedUrl;
 
 export default function XAgentPage() {
   return (
-    <PlatformShell>
-      <Link to="/brand" className="back-to-platform">← Brand Visibility</Link>
-      <div className="shell-eyebrow">X Agent</div>
-      <h1 className="shell-h1">Voice AI builder conversations <span className="accent">on X</span></h1>
-      <p className="shell-sub">
-        Real-time scraping, classification, and prioritization of X (Twitter) posts mentioning voice AI infrastructure.
-        5,078 tweets classified across the A–K taxonomy. Embedded dashboard below.
-      </p>
+    <PlatformShell fullBleed>
+      <div className="iframe-page-header">
+        <Link to="/brand" className="back-to-platform">← Brand Visibility</Link>
+        <div className="iframe-page-title">
+          <span className="iframe-page-eyebrow">X Agent</span>
+          <span className="iframe-page-name">Voice AI builder conversations on X</span>
+        </div>
+        <a href={DASHBOARD_URL.replace('?embedded=true', '')} target="_blank" rel="noreferrer" className="iframe-open-external">
+          Open in new tab ↗
+        </a>
+      </div>
       <div className="x-iframe-wrap">
         <iframe
           src={DASHBOARD_URL}
