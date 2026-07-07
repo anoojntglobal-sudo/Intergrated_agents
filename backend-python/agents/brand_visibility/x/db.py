@@ -153,7 +153,8 @@ class Database:
     """Turso-backed data access via the libsql embedded-replica driver."""
 
     def __init__(self, db_path: str | None = None, skip_schema_init: bool = False,
-                 sync_interval: int | None = TURSO_SYNC_INTERVAL) -> None:
+                 sync_interval: int | None = TURSO_SYNC_INTERVAL,
+                 replica_path: str | None = None) -> None:
         # db_path kept for backward compatibility — ignored, we use Turso.
         #
         # skip_schema_init: when True, connect + sync only — skip all CREATE/ALTER
@@ -167,12 +168,17 @@ class Database:
         # write-heavy work like the X5 run-now background task, where a background
         # sync firing mid-write can trigger a libsql WAL conflict. With None, the
         # caller MUST call .sync() explicitly to flush writes to remote Turso.
+        #
+        # replica_path: override the shared REPLICA_PATH with a distinct file per
+        # instance (e.g. for the run-now background task, which needs its own writer
+        # file to avoid WAL locks with concurrent reader connections that share the
+        # default replica). Defaults to REPLICA_PATH when None.
         if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
             raise RuntimeError(
                 "TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be set in .env. "
                 "Copy them from the dashboard's .env.local."
             )
-        self.replica_path = str(REPLICA_PATH)
+        self.replica_path = str(replica_path) if replica_path else str(REPLICA_PATH)
         self._conn_obj = turso_client.connect(
             self.replica_path,
             TURSO_DATABASE_URL,
@@ -1358,9 +1364,14 @@ class Database:
     _RUN_UPDATE_FIELDS = {"records_new", "records_updated", "calls_used", "status", "error_message"}
 
     def get_running_run(self) -> dict | None:
-        """Most recent in-flight run, for the concurrency guard. None if idle."""
+        """Most recent in-flight run, for the concurrency guard. None if idle.
+        A row older than 30 minutes is treated as dead — sweeps cap at ~10 min,
+        so a longer 'running' state means the process crashed without recording
+        failure. Auto-expiring prevents orphan rows from permanently blocking cron."""
         rows = self.query(
-            "SELECT * FROM agent_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+            "SELECT * FROM agent_runs WHERE status = 'running' "
+            "AND started_at > datetime('now', '-30 minutes') "
+            "ORDER BY started_at DESC LIMIT 1"
         )
         return rows[0] if rows else None
 

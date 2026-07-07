@@ -39,7 +39,15 @@ def _run_sweep_task(run_id: int, config: dict) -> None:
     from agents.brand_visibility.x.db import Database
     from agents.brand_visibility.x.orchestrator import run_sweep
 
-    task_db = Database(sync_interval=None, skip_schema_init=True)
+    # Own writer replica file (per run + pid), so the sweep's writes never share
+    # the default replica with concurrent reader connections (get_x_db) — that
+    # sharing is what caused the WAL-lock crashes.
+    task_replica_path = f"/tmp/ka017_run_{run_id}_pid_{os.getpid()}.db"
+    task_db = Database(
+        sync_interval=None,
+        skip_schema_init=True,
+        replica_path=task_replica_path,
+    )
     try:
         stats = run_sweep(task_db, run_id, config, post_enabled=False)
         task_db.finish_run(
@@ -64,6 +72,14 @@ def _run_sweep_task(run_id: int, config: dict) -> None:
             task_db.sync()  # explicit flush — sync_interval=None disables auto-sync
         except Exception:
             logger.exception("run-now %s: final Turso sync failed", run_id)
+
+        # Clean up per-run replica file so it doesn't accumulate on disk
+        try:
+            for path in [task_replica_path, task_replica_path + '-shm', task_replica_path + '-wal']:
+                if os.path.exists(path):
+                    os.remove(path)
+        except Exception:
+            logger.exception("run-now %s: replica cleanup failed", run_id)
 
 
 class UpdatePromptRequest(BaseModel):
