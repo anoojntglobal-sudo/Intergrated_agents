@@ -1,0 +1,71 @@
+name: Rescan All Leaderboards
+
+on:
+  schedule:
+    # Runs on the 1st and 15th of every month at 02:00 UTC (~every 14 days)
+    - cron: '0 2 1,15 * *'
+  workflow_dispatch:
+    # Also triggerable manually from the GitHub Actions tab — useful for testing
+
+jobs:
+  rescan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60   # Scraping all leaderboards can take a while
+
+    steps:
+      - name: Login — get JWT
+        id: auth
+        run: |
+          RESPONSE=$(curl -sf \
+            -X POST "${{ secrets.LEADERBOARD_BACKEND_URL }}/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"${{ secrets.LEADERBOARD_USERNAME }}\",\"password\":\"${{ secrets.LEADERBOARD_PASSWORD }}\"}")
+          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "Login failed. Response: $RESPONSE"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "Login successful."
+
+      - name: Fetch all leaderboard IDs
+        id: list
+        run: |
+          RESPONSE=$(curl -sf \
+            "${{ secrets.LEADERBOARD_BACKEND_URL }}/leaderboards?limit=500" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+          IDS=$(echo "$RESPONSE" | jq -r '.[].id')
+          COUNT=$(echo "$IDS" | grep -c '^' || true)
+          echo "Found $COUNT leaderboards."
+          # Newline-separated → space-separated for the loop
+          echo "ids=$(echo $IDS | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Rescan each leaderboard
+        run: |
+          BACKEND="${{ secrets.LEADERBOARD_BACKEND_URL }}"
+          TOKEN="${{ steps.auth.outputs.token }}"
+          PASS=0
+          FAIL=0
+
+          for ID in ${{ steps.list.outputs.ids }}; do
+            echo "Rescanning leaderboard $ID..."
+            HTTP=$(curl -s -o /tmp/rescan_out.json -w "%{http_code}" \
+              -X POST "$BACKEND/leaderboards/$ID/rescan" \
+              -H "Authorization: Bearer $TOKEN")
+            if [ "$HTTP" = "200" ]; then
+              STATUS=$(jq -r '.status // "ok"' /tmp/rescan_out.json 2>/dev/null || echo "ok")
+              echo "  ✓ $ID — $STATUS"
+              PASS=$((PASS+1))
+            else
+              ERR=$(jq -r '.detail // empty' /tmp/rescan_out.json 2>/dev/null || cat /tmp/rescan_out.json)
+              echo "  ✗ $ID — HTTP $HTTP: $ERR"
+              FAIL=$((FAIL+1))
+            fi
+            # Pause between rescans so the scraping target sites aren't hammered
+            sleep 8
+          done
+
+          echo ""
+          echo "Done — $PASS succeeded, $FAIL failed."
+          [ "$FAIL" -eq 0 ] || exit 1
