@@ -116,10 +116,14 @@ app.include_router(dashboards_router.router, tags=["dashboards"])
 
 @app.get("/health")
 def health() -> dict:
+    # RAILWAY_GIT_COMMIT_SHA is auto-injected by Railway; exposes the running
+    # build so a single curl confirms which commit is live (defaults to "dev").
+    commit = os.getenv("RAILWAY_GIT_COMMIT_SHA", "dev")[:7]
     return {
         "status": "ok",
         "service": "brand-visibility-agent-api",
         "version": API_VERSION,
+        "commit": commit,
     }
 
 
