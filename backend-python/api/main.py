@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -27,6 +28,16 @@ from api.routers import linkedin as linkedin_router
 from api.routers import x as x_router
 
 API_VERSION = "0.1.0"
+
+# Configure root logging so application module loggers (getLogger(__name__) in
+# orchestrator/x_scraper/classifier) reach stdout under uvicorn. Without this,
+# root has no handler in the API process and INFO messages are silently dropped
+# (only uvicorn's own loggers are configured). Level from LOG_LEVEL (default INFO).
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    stream=sys.stdout,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 # uvicorn's logger so lifespan messages appear in the server output.
 logger = logging.getLogger("uvicorn.error")
